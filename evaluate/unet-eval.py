@@ -48,7 +48,7 @@ def evaluate_metrics(loader, model, device, num_classes=4):
 
     # Final Class-wise Metrics calculation
     class_names = ["Background", "Sclera", "Iris", "Pupil"]
-    print("\n================ 📊 FINAL TEST METRICS ================")
+    print("\n================ FINAL TEST METRICS ================")
     
     iou_list = []
     dice_list = []
@@ -88,12 +88,12 @@ def main():
         print(f"[ERROR] Model file '{MODEL_PATH}' nahi mili! Pehle training poori hone dein.")
         return
 
-    # Data Loading (Wahi same logic jo training mein test set nikalne ke liye tha)
+    # Data Loading
     images_available = set([f[:-4] for f in os.listdir(IMAGE_DIR) if f.lower().endswith('.png')])
     masks_available = set([f[:-4] for f in os.listdir(MASK_DIR) if f.lower().endswith('.npy')])
     all_images = sorted(list(images_available.intersection(masks_available)))
     
-    # Test set ko alag nikalna (Same ratio: 80-10-10)
+    # Seperate Test set (Same ratio: 80-10-10)
     _, temp_imgs = train_test_split(all_images, test_size=0.2, shuffle=False)
     _, test_imgs = train_test_split(temp_imgs, test_size=0.5, shuffle=False)
     
@@ -102,12 +102,12 @@ def main():
     test_ds = OpenEDSDataset(IMAGE_DIR, MASK_DIR, test_imgs, transform=val_transform)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
 
-    # Model Initialize aur Weights Load karna
+    # Model Initialization and Weights 
     model = UNet(in_channels=1, num_classes=4).to(DEVICE)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
     print(f"[INFO] Model weights successfully loaded from '{MODEL_PATH}'")
 
-    # Metrics Calculate karna
+    # Metrics Calculation
     evaluate_metrics(test_loader, model, DEVICE, num_classes=4)
 
 if __name__ == "__main__":
