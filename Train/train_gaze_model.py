@@ -15,9 +15,9 @@ from custom_datasets.Lpw import LPWGazeDataset , transformations
 from Models.gaze_model import GazeModel
 
 def main():
-    # 🖥️ Hardware Setup
+    #  Hardware Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🖥️ System Processing Unit: {device}")
+    print(f"System Processing Unit: {device}")
 
  
 
@@ -37,7 +37,7 @@ def main():
 
     print(f"Dataset Loaded | Train Frames: {train_size} | Val Frames: {val_size}")
 
-    #DATALOADERS (With multi-core workers processing safely enabled)
+    #DATALOADERS 
     train_loader = DataLoader(
         train_dataset,
         batch_size=16,
@@ -56,11 +56,11 @@ def main():
 
     #Model, Loss, Optimizer Initialization
     model = GazeModel().to(device)
-    criterion = nn.MSELoss()
-    # Learning rate ko 1e-4 se badha kar 3e-4 kar diya (Adam's sweet spot)
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+    criterion = nn.L1Loss()
+   
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4,weight_decay=1e-4)
 
-    EPOCHS = 10
+    EPOCHS = 20
     best_val_loss = float("inf")
 
     print("\nStarting Training Loop...")
@@ -114,7 +114,7 @@ def main():
         #Save Best Model Weights
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            # Aapke structure ke hisab se root par save ho raha hai
+           
             torch.save(model.state_dict(), "best_gaze_model.pth")
             print("Best model checkpoint updated & saved safely!")
         print("-" * 50)
