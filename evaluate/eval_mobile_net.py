@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
-import pandas as pd
 from torch.utils.data import DataLoader
-import torchvision.transforms as transforms
 
 from custom_datasets.Lpw import LPWGazeDataset, transformations
 from Models.gaze_model import GazeModel
@@ -10,51 +8,54 @@ from Models.gaze_model import GazeModel
 
 def main():
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Device:", device)
 
-        IMG_DIR = "data/lpw_extracted/images"
-        test_dataset = LPWGazeDataset("data/test.csv", IMG_DIR, transform=transformations)
-        test_loader = DataLoader(test_dataset, batch_size=16,num_workers=4, shuffle=False)
+   
+    test_dataset = LPWGazeDataset("data/lpw_extracted/test.csv", transformations)
 
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=0  
+    )
 
-        # ===== LOAD MODEL =====
-        model = GazeModel().to(device)
-        model.load_state_dict(torch.load("best_gaze_model.pth"))
-        model.eval()
+    # ===== MODEL =====
+    model = GazeModel().to(device)
+    model.load_state_dict(torch.load("Models/best_gaze_model.pth"))
+    model.eval()
 
-        
-        # ===== METRICS =====
-        mse_total = 0
-        mae_total = 0
-        dist_total = 0
-        count = 0
+    # ===== METRICS =====
+    mse_total = 0
+    mae_total = 0
+    dist_total = 0
+    total_samples = 0
 
+    # ===== TEST LOOP =====
+    with torch.no_grad():
+        for imgs, labels in test_loader:
+            imgs = imgs.to(device)
+            labels = labels.to(device)
 
-        # ===== TEST LOOP =====
-        with torch.no_grad():
-            for imgs, labels in test_loader:
-                imgs = imgs.to(device)
-                labels = labels.to(device)
+            preds = model(imgs)
 
-                preds = model(imgs)
+            
+            mse = ((preds - labels) ** 2).mean(dim=1)
+            mae = torch.abs(preds - labels).mean(dim=1)
+            dist = torch.sqrt(((preds - labels) ** 2).sum(dim=1))
 
-                mse = torch.mean((preds - labels) ** 2)
-                mae = torch.mean(torch.abs(preds - labels))
-                dist = torch.sqrt(torch.sum((preds - labels) ** 2, dim=1)).mean()
+            mse_total += mse.sum().item()
+            mae_total += mae.sum().item()
+            dist_total += dist.sum().item()
+            total_samples += labels.size(0)
 
-                mse_total += mse.item()
-                mae_total += mae.item()
-                dist_total += dist.item()
-                count += 1
-
-
-        # ===== PRINT RESULTS =====
-        print("\n===== TEST RESULTS =====")
-        print("Test MSE:", mse_total / count)
-        print("Test MAE:", mae_total / count)
-        print("Avg Distance:", dist_total / count)
-
+    # ===== FINAL RESULTS =====
+    print("\n===== TEST RESULTS =====")
+    print("Test MSE:", mse_total / total_samples)
+    print("Test MAE:", mae_total / total_samples)
+    print("Avg Distance:", dist_total / total_samples)
 
 
 if __name__ == "__main__":
-    main()   
+    main() 
