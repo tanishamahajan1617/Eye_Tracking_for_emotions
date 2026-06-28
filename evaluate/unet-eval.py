@@ -48,7 +48,7 @@ def evaluate_metrics(loader, model, device, num_classes=4):
 
     # Final Class-wise Metrics calculation
     class_names = ["Background", "Sclera", "Iris", "Pupil"]
-    print("\n================ 📊 FINAL TEST METRICS ================")
+    print("\n================ FINAL TEST METRICS ================")
     
     iou_list = []
     dice_list = []
