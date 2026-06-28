@@ -4,3 +4,4 @@ custom_datasets/
 *.pth
 __pycache__/
 *.pyc
+preprocess/
