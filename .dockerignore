@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pth
+data/
+custom_datasets/
+.git/
