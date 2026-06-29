@@ -6,4 +6,4 @@ __pycache__/
 *.pyc
 
 
-app/backend/
+app/backend/ 
