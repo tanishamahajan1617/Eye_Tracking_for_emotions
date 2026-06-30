@@ -8,18 +8,21 @@ import torch
 import sys
 import requests
 from pathlib import Path
-from streamlit_webrtc import streamlit_webrtc_streamer, VideoProcessorBase, RTCConfiguration
+# WebRTC Imports for Live Webcam on Cloud (Sahi imports)
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
-
+# --- 📁 PATHS MANAGEMENT & MODEL IMPORTS ---
 ROOT_DIR = Path(__file__).parent.parent  # Root folder tak pahunchne ke liye
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
+# Cloud Paths for Weights
 WEIGHTS_SEG = ROOT_DIR / "best_unet_model.pth"
 WEIGHTS_GAZE = ROOT_DIR / "best_gaze_model.pth"
 WEIGHTS_EMOTION = ROOT_DIR / "best_emotion_lstm.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# --- 📥 GOOGLE DRIVE AUTO-DOWNLOADER ---
 def download_file_from_google_drive(file_id, destination):
     URL = "https://docs.google.com/uc?export=download"
     session = requests.Session()
@@ -40,7 +43,7 @@ SEG_FILE_ID = "11dayKwl4X3UUfERRpyl6s-nz_YXAZvcA"
 GAZE_FILE_ID = "1EvaC29K0VoCsc7xG72j571cz6mumlsU7"           
 EMOTION_FILE_ID = "1Wh4Rro4jkj9_xCoTs1G11ZA5pNVUPMr7"     
 
-
+# Automatic Download Trigger
 with st.spinner("Syncing Cloud Architecture... Checking Weights..."):
     if not WEIGHTS_SEG.exists() and SEG_FILE_ID != "YOUR_UNET_DRIVE_FILE_ID_HERE":
         st.info("Downloading UNet Weights...")
@@ -52,6 +55,7 @@ with st.spinner("Syncing Cloud Architecture... Checking Weights..."):
         st.info("Downloading Emotion LSTM Weights...")
         download_file_from_google_drive(EMOTION_FILE_ID, WEIGHTS_EMOTION)
 
+# Direct Imports from Models folder
 try:
     from Models.eyesegementation_model import UNet
     from Models.gaze_model import GazeModel
@@ -59,9 +63,9 @@ try:
     models_imported = True
 except ImportError as e:
     models_imported = False
-    st.error(f"Model classes import error: {e}")
+    st.error(f"⚠️ Model classes import error: {e}")
 
-
+# --- 🚀 CACHE MODELS FOR SPEED ---
 @st.cache_resource
 def load_vision_models():
     seg, gaze, emotion = None, None, None
@@ -83,9 +87,9 @@ GAZE_HISTORY = []
 SEQUENCE_LENGTH = 30
 EMOTION_CLASSES = ["Neutral", "Focused", "Distracted"]
 
-
+# --- 💻 STREAMLIT INTERFACE ---
 st.set_page_config(page_title="Vision AI Production Node", layout="wide")
-st.title("Emotion Monitor")
+st.title("👁️ Enterprise Vision & Emotion Monitor (Cloud Live)")
 
 tab_video, tab_live = st.tabs(["🎥 Network Video Analyzer", "📸 Live Webcam Node"])
 
@@ -150,6 +154,7 @@ def local_process_frame(frame):
         
     return frame, gaze_vectors, eye_detected, detected_emotion
 
+# --- 🎥 MODE 1: VIDEO UPLOADER ---
 with tab_video:
     st.subheader("Upload Target Video File")
     uploaded = st.file_uploader("Choose a video file...", type=["mp4", "mov", "avi"])
@@ -177,7 +182,7 @@ with tab_video:
             try: os.unlink(tmp_path)
             except Exception: pass
 
-
+# --- 📸 MODE 2: LIVE WEBCAM NODE ---
 with tab_live:
     st.subheader("📹 Real-time Cloud WebRTC Node")
     st.write("Click 'Start' below to stream your laptop camera to the cloud computing cluster.")
@@ -188,7 +193,7 @@ with tab_live:
             # 1. Frame ko WebRTC standard se OpenCV BGR image format mein badlo
             img = frame.to_ndarray(format="bgr24")
             
-            # 2. Aapka banaya hua local_process_frame model pipeline call karo
+            # 2. Sahi model pipeline call karo
             try:
                 processed_img, gaze, detected, emotion = local_process_frame(img)
                 
@@ -198,11 +203,11 @@ with tab_live:
             except Exception as e:
                 processed_img = img
 
-            # 3. Processed frame ko browser par wapas real-time fetch karao
+            # 3. Processed frame ko browser par wapas real-time send karo
             return frame.from_ndarray(processed_img, format="bgr24")
 
-    
-    streamlit_webrtc_streamer(
+    # Fixed: Sahi function name 'webrtc_streamer' call kiya hai yahan
+    webrtc_streamer(
         key="cloud-eye-tracking-stream",
         video_processor_factory=CloudVideoProcessor,
         rtc_configuration=RTCConfiguration(
