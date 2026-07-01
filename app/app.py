@@ -199,7 +199,7 @@ with tab_live:
 
             return frame.from_ndarray(processed_img, format="bgr24")
 
-    # Pure Cloud-Optimized Framework Setup (Bypasses Redacted Multi-threading errors)
+    # Fixed: Removed 'send_warning' parameter to resolve TypeError
     try:
         webrtc_streamer(
             key="cloud-eye-tracking-stream",
@@ -210,8 +210,7 @@ with tab_live:
             media_stream_constraints={
                 "video": True,
                 "audio": False
-            },
-            send_warning=False,
+            }
         )
     except Exception as e:
         st.error(f"WebRTC Pipeline Bridge Interrupted: {e}")
