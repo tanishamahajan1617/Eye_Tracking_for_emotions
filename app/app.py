@@ -10,33 +10,23 @@ import requests
 import logging
 import asyncio
 from pathlib import Path
-# WebRTC Imports for Live Webcam on Cloud
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
 
-# --- ⚙️ CORE MONKEY PATCH FOR AIOICE / ASYNCIO TERMINATION CRASHES ---
-# Yeh bypass code aioice ki dead network threads ko silent karega jab Streamlit loop refresh hoga
-import aioice.stun
-original_retry = aioice.stun.Transaction._Transaction__retry
-
-def patched_retry(self):
-    try:
-        if hasattr(self, '_Transaction__protocol') and self._Transaction__protocol and self._Transaction__protocol.transport:
-            original_retry(self)
-    except Exception:
-        pass  # Dead socket loops ko silently drop karo
-
-aioice.stun.Transaction._Transaction__retry = patched_retry
-
-# Logging levels ko bhi clean state par silent karo
+# --- 🔇 FORCE ASYNC ENGINE LOCKOUT ---
 logging.getLogger("aioice").setLevel(logging.CRITICAL)
 logging.getLogger("streamlit_webrtc").setLevel(logging.CRITICAL)
 
+# STUN Timeout Monkey Patch
+import aioice.stun
+def patched_retry(self):
+    pass
+aioice.stun.Transaction._Transaction__retry = patched_retry
+
 # --- 📁 PATHS MANAGEMENT & MODEL IMPORTS ---
-ROOT_DIR = Path(__file__).parent.parent  # Root folder tak pahunchne ke liye
+ROOT_DIR = Path(__file__).parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.append(str(ROOT_DIR))
 
-# Cloud Paths for Weights
 WEIGHTS_SEG = ROOT_DIR / "best_unet_model.pth"
 WEIGHTS_GAZE = ROOT_DIR / "best_gaze_model.pth"
 WEIGHTS_EMOTION = ROOT_DIR / "best_emotion_lstm.pth"
@@ -63,7 +53,6 @@ SEG_FILE_ID = "11dayKwl4X3UUfERRpyl6s-nz_YXAZvcA"
 GAZE_FILE_ID = "1EvaC29K0VoCsc7xG72j571cz6mumlsU7"           
 EMOTION_FILE_ID = "1Wh4Rro4jkj9_xCoTs1G11ZA5pNVUPMr7"     
 
-# Automatic Download Trigger
 with st.spinner("Syncing Cloud Architecture... Checking Weights..."):
     if not WEIGHTS_SEG.exists() and SEG_FILE_ID != "YOUR_UNET_DRIVE_FILE_ID_HERE":
         st.info("Downloading UNet Weights...")
@@ -75,7 +64,6 @@ with st.spinner("Syncing Cloud Architecture... Checking Weights..."):
         st.info("Downloading Emotion LSTM Weights...")
         download_file_from_google_drive(EMOTION_FILE_ID, WEIGHTS_EMOTION)
 
-# Direct Imports from Models folder
 try:
     from Models.eyesegementation_model import UNet
     from Models.gaze_model import GazeModel
@@ -85,7 +73,6 @@ except ImportError as e:
     models_imported = False
     st.error(f"⚠️ Model classes import error: {e}")
 
-# --- 🚀 CACHE MODELS FOR SPEED ---
 @st.cache_resource
 def load_vision_models():
     seg, gaze, emotion = None, None, None
@@ -102,17 +89,11 @@ def load_vision_models():
 
 seg_model, gaze_model, emotion_model = load_vision_models()
 
-# Global Buffer for Emotion Sequence
 GAZE_HISTORY = []
 SEQUENCE_LENGTH = 30
 EMOTION_CLASSES = ["Neutral", "Focused", "Distracted"]
 
-# --- 💻 STREAMLIT INTERFACE ---
-st.set_page_config(page_title="Vision AI Production Node", layout="wide")
-st.title("👁️ Enterprise Vision & Emotion Monitor (Cloud Live)")
-
-tab_video, tab_live = st.tabs(["🎥 Network Video Analyzer", "📸 Live Webcam Node"])
-
+# --- 💻 CORE ANALYTICS ENGINE ---
 def local_process_frame(frame):
     global GAZE_HISTORY
     eye_detected = False
@@ -159,7 +140,6 @@ def local_process_frame(frame):
         cv2.rectangle(frame, (ex, ey), (ex+ew, ey+eh), (0, 255, 0), 2)
         break
 
-    # 3. Emotion Pipeline Sequence Logger
     GAZE_HISTORY.append(gaze_vectors)
     if len(GAZE_HISTORY) > SEQUENCE_LENGTH: GAZE_HISTORY.pop(0)
     
@@ -174,7 +154,12 @@ def local_process_frame(frame):
         
     return frame, gaze_vectors, eye_detected, detected_emotion
 
-# --- 🎥 MODE 1: VIDEO UPLOADER ---
+# --- 💻 STREAMLIT UI ---
+st.set_page_config(page_title="Vision AI Production Node", layout="wide")
+st.title("👁️ Enterprise Vision & Emotion Monitor (Cloud Live)")
+
+tab_video, tab_live = st.tabs(["🎥 Network Video Analyzer", "📸 Live Webcam Node"])
+
 with tab_video:
     st.subheader("Upload Target Video File")
     uploaded = st.file_uploader("Choose a video file...", type=["mp4", "mov", "avi"])
@@ -202,34 +187,48 @@ with tab_video:
             try: os.unlink(tmp_path)
             except Exception: pass
 
-# --- 📸 MODE 2: LIVE WEBCAM NODE ---
+# --- 📸 MODE 2: WEB CAM LIVE TAB (STABLE PRODUCTION ENGINE) ---
 with tab_live:
     st.subheader("📹 Real-time Cloud WebRTC Node")
     st.write("Click 'Start' below to stream your laptop camera to the cloud computing cluster.")
 
     class CloudVideoProcessor(VideoProcessorBase):
+        def __init__(self) -> None:
+            self.frame_skip = 0
+
         def recv(self, frame):
             img = frame.to_ndarray(format="bgr24")
-            try:
-                processed_img, gaze, detected, emotion = local_process_frame(img)
-                cv2.putText(processed_img, f"State: {emotion}", (20, 50), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            except Exception:
-                processed_img = img
+            self.frame_skip += 1
+            
+            # CPU frames drop hone se bachane ke liye computation alternate frames par chalegi
+            if self.frame_skip % 2 == 0:
+                try:
+                    processed_img, gaze, detected, emotion = local_process_frame(img)
+                    cv2.putText(processed_img, f"State: {emotion}", (20, 50), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    self.last_clean_frame = processed_img
+                except Exception:
+                    self.last_clean_frame = img
+            
+            if hasattr(self, 'last_clean_frame'):
+                return frame.from_ndarray(self.last_clean_frame, format="bgr24")
+            return frame.from_ndarray(img, format="bgr24")
 
-            return frame.from_ndarray(processed_img, format="bgr24")
-
-    try:
-        webrtc_streamer(
-            key="cloud-eye-tracking-stream",
-            video_processor_factory=CloudVideoProcessor,
-            rtc_configuration=RTCConfiguration(
-                {"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]}
-            ),
-            media_stream_constraints={
-                "video": True,
-                "audio": False
-            }
-        )
-    except Exception:
-        pass
+    # Production WebRTC Network Pipeline Configuration Block
+    webrtc_streamer(
+        key="stable-cloud-eye-tracking",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=CloudVideoProcessor,
+        rtc_configuration=RTCConfiguration(
+            {"iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+                {"urls": ["stun:stun2.l.google.com:19302"]}
+            ]}
+        ),
+        media_stream_constraints={
+            "video": True,
+            "audio": False
+        },
+        async_processing=True
+    )
