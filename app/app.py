@@ -13,24 +13,23 @@ from pathlib import Path
 # WebRTC Imports for Live Webcam on Cloud
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
-# --- 🔇 FORCE ASYNCIO EXCEPTION SILENCER ---
-# Yeh core asyncio loop ke andar jaakar NoneType aur sendto errors ko backend logs se filter kar dega
+# --- ⚙️ CORE MONKEY PATCH FOR AIOICE / ASYNCIO TERMINATION CRASHES ---
+# Yeh bypass code aioice ki dead network threads ko silent karega jab Streamlit loop refresh hoga
+import aioice.stun
+original_retry = aioice.stun.Transaction._Transaction__retry
+
+def patched_retry(self):
+    try:
+        if hasattr(self, '_Transaction__protocol') and self._Transaction__protocol and self._Transaction__protocol.transport:
+            original_retry(self)
+    except Exception:
+        pass  # Dead socket loops ko silently drop karo
+
+aioice.stun.Transaction._Transaction__retry = patched_retry
+
+# Logging levels ko bhi clean state par silent karo
 logging.getLogger("aioice").setLevel(logging.CRITICAL)
 logging.getLogger("streamlit_webrtc").setLevel(logging.CRITICAL)
-
-def custom_asyncio_exception_handler(loop, context):
-    message = context.get('message', '')
-    # Agar error NoneType, sendto ya call_exception_handler se related hai, toh use silently ignore karo
-    if "NoneType" in message or "sendto" in message or "call_exception_handler" in message:
-        return
-    # Baaki real errors ko standard tarike se chalne do
-    loop.default_exception_handler(context)
-
-try:
-    current_loop = asyncio.get_event_loop()
-    current_loop.set_exception_handler(custom_asyncio_exception_handler)
-except Exception:
-    pass
 
 # --- 📁 PATHS MANAGEMENT & MODEL IMPORTS ---
 ROOT_DIR = Path(__file__).parent.parent  # Root folder tak pahunchne ke liye
