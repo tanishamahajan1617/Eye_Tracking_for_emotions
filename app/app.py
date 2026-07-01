@@ -7,9 +7,15 @@ import time
 import torch
 import sys
 import requests
+import logging
 from pathlib import Path
 # WebRTC Imports for Live Webcam on Cloud
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+
+# --- 🔇 SUPPRESS BACKGROUND ASYNCIO/STUN LOG TRACES ---
+# Yeh logs terminal mein error saaf rakhenge jab aioice disconnect hoga
+logging.getLogger("aioice").setLevel(logging.CRITICAL)
+logging.getLogger("streamlit_webrtc").setLevel(logging.CRITICAL)
 
 # --- 📁 PATHS MANAGEMENT & MODEL IMPORTS ---
 ROOT_DIR = Path(__file__).parent.parent  # Root folder tak pahunchne ke liye
@@ -199,7 +205,6 @@ with tab_live:
 
             return frame.from_ndarray(processed_img, format="bgr24")
 
-    # Fixed: Removed 'send_warning' parameter to resolve TypeError
     try:
         webrtc_streamer(
             key="cloud-eye-tracking-stream",
@@ -213,4 +218,4 @@ with tab_live:
             }
         )
     except Exception as e:
-        st.error(f"WebRTC Pipeline Bridge Interrupted: {e}")
+        pass  
