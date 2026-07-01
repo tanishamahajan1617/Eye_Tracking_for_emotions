@@ -8,14 +8,29 @@ import torch
 import sys
 import requests
 import logging
+import asyncio
 from pathlib import Path
 # WebRTC Imports for Live Webcam on Cloud
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
-# --- 🔇 SUPPRESS BACKGROUND ASYNCIO/STUN LOG TRACES ---
-# Yeh logs terminal mein error saaf rakhenge jab aioice disconnect hoga
+# --- 🔇 FORCE ASYNCIO EXCEPTION SILENCER ---
+# Yeh core asyncio loop ke andar jaakar NoneType aur sendto errors ko backend logs se filter kar dega
 logging.getLogger("aioice").setLevel(logging.CRITICAL)
 logging.getLogger("streamlit_webrtc").setLevel(logging.CRITICAL)
+
+def custom_asyncio_exception_handler(loop, context):
+    message = context.get('message', '')
+    # Agar error NoneType, sendto ya call_exception_handler se related hai, toh use silently ignore karo
+    if "NoneType" in message or "sendto" in message or "call_exception_handler" in message:
+        return
+    # Baaki real errors ko standard tarike se chalne do
+    loop.default_exception_handler(context)
+
+try:
+    current_loop = asyncio.get_event_loop()
+    current_loop.set_exception_handler(custom_asyncio_exception_handler)
+except Exception:
+    pass
 
 # --- 📁 PATHS MANAGEMENT & MODEL IMPORTS ---
 ROOT_DIR = Path(__file__).parent.parent  # Root folder tak pahunchne ke liye
@@ -217,5 +232,5 @@ with tab_live:
                 "audio": False
             }
         )
-    except Exception as e:
-        pass  
+    except Exception:
+        pass
