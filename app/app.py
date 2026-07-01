@@ -187,27 +187,31 @@ with tab_live:
     st.subheader("📹 Real-time Cloud WebRTC Node")
     st.write("Click 'Start' below to stream your laptop camera to the cloud computing cluster.")
 
-    # Wrapper class jo webcam ke real-time video frames process karegi
     class CloudVideoProcessor(VideoProcessorBase):
         def recv(self, frame):
             img = frame.to_ndarray(format="bgr24")
-            
             try:
                 processed_img, gaze, detected, emotion = local_process_frame(img)
                 cv2.putText(processed_img, f"State: {emotion}", (20, 50), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            except Exception as e:
+            except Exception:
                 processed_img = img
 
             return frame.from_ndarray(processed_img, format="bgr24")
 
-    # Added send_warning=False to prevent asyncio/aioice termination crashes
-    webrtc_streamer(
-        key="cloud-eye-tracking-stream",
-        video_processor_factory=CloudVideoProcessor,
-        rtc_configuration=RTCConfiguration(
-            {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}  # Google STUN server
-        ),
-        media_stream_constraints={"video": True, "audio": False},
-        send_warning=False,  # Suppresses connection close traces on tab switching
-    )
+    # Pure Cloud-Optimized Framework Setup (Bypasses Redacted Multi-threading errors)
+    try:
+        webrtc_streamer(
+            key="cloud-eye-tracking-stream",
+            video_processor_factory=CloudVideoProcessor,
+            rtc_configuration=RTCConfiguration(
+                {"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]}
+            ),
+            media_stream_constraints={
+                "video": True,
+                "audio": False
+            },
+            send_warning=False,
+        )
+    except Exception as e:
+        st.error(f"WebRTC Pipeline Bridge Interrupted: {e}")
