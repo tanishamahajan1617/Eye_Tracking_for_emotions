@@ -14,10 +14,11 @@ st.set_page_config(page_title="Eye Tracking & Emotion AI Demo", layout="wide")
 st.title("👁️ Eye Tracking & Emotion Recognition System")
 st.caption("Real-time Eye Segmentation (UNet), Gaze Estimation, and Sequence-based Emotion Classification (LSTM)")
 
-# --- 2. PATHS & AUTO-DOWNLOADER (Original Logic) ---
+# --- 2. PATHS & AUTO-DOWNLOADER (Flexible Root Resolution) ---
 CURRENT_DIR = Path(__file__).parent
 REPO_ROOT = CURRENT_DIR.parent
 
+# Add paths to sys.path so custom model imports work
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
@@ -33,13 +34,14 @@ def download_file_from_google_drive(file_id, destination):
     url = f'https://drive.google.com/uc?id={file_id}'
     gdown.download(url, str(destination), quiet=False)
 
-# Google Drive File IDs (Original Links)
+# Google Drive File IDs (Correct links from original setup)
 SEG_FILE_ID = "11dayKwl4X3UUfERRpyl6s-nz_YXAZvcA"       
 GAZE_FILE_ID = "1EvaC29K0VoCsc7xG72j571cz6mumlsU7"          
 EMOTION_FILE_ID = "1Wh4Rro4jkj9_xCoTs1G11ZA5pNVUPMr7"  
 SCALER_FILE_ID = "1uOtZmD7900j5hbSfV4WTJ8DVvec7B-0r"
 
-with st.spinner("Downloading/Loading Models from Drive..."):
+with st.spinner("Syncing Cloud Architecture... Checking Weights & Scaler..."):
+    # Download files ONLY if they do not exist
     if not WEIGHTS_SEG.exists():
         download_file_from_google_drive(SEG_FILE_ID, WEIGHTS_SEG)
     if not WEIGHTS_GAZE.exists():
@@ -49,9 +51,10 @@ with st.spinner("Downloading/Loading Models from Drive..."):
     if not SCALER_FILE.exists():
         download_file_from_google_drive(SCALER_FILE_ID, SCALER_FILE)
 
-# --- 3. MODEL LOADERS ---
+# --- 3. MODEL ARCHITECTURES (Simplified Inference Loaders) ---
 @st.cache_resource
 def load_all_assets():
+    """Loads and caches all weights and scalers efficiently."""
     try:
         from Models.eyesegementation_model import UNet
         from Models.gaze_model import GazeModel
@@ -67,7 +70,7 @@ def load_all_assets():
         gaze_model.load_state_dict(torch.load(WEIGHTS_GAZE, map_location=DEVICE))
         gaze_model.eval()
 
-        # Load Emotion LSTM
+        # Load Emotion LSTM (non-strict for key mismatch bypass)
         emotion_model = EmotionLSTM(input_size=3, num_classes=4).to(DEVICE)
         emotion_model.load_state_dict(torch.load(WEIGHTS_EMOTION, map_location=DEVICE), strict=False)
         emotion_model.eval()
@@ -84,8 +87,10 @@ seg_model, gaze_model, emotion_model, gaze_scaler, loaded_ok = load_all_assets()
 
 # --- 4. FRAME PROCESSING FUNCTION ---
 def process_frame(frame, sequence_buffer):
+    """Processes a single video frame through UNet -> Gaze -> Emotion LSTM pipeline."""
     h, w, _ = frame.shape
     
+    # Define primary eye zone crop (Eyebrow avoid vertically)
     ex, ey = int(w * 0.15), int(h * 0.35)
     ew, eh = int(w * 0.70), int(h * 0.40)
     eye_crop = frame[ey:ey+eh, ex:ex+ew]
@@ -94,9 +99,16 @@ def process_frame(frame, sequence_buffer):
     pupil_ratio = 0.33
     
     if eye_crop.size > 0:
-        # A. UNet Segmentation & Highlights
-        img_seg = cv2.resize(eye_crop, (256, 256)).transpose((2, 0, 1)) / 255.0
-        img_seg_t = torch.tensor([img_seg], dtype=torch.float32).to(DEVICE)
+        # A. 🎯 UNET SEGMENTATION (FIXED DIMENSIONS HERE)
+        # 1. Ensure RGB
+        img_rgb = cv2.cvtColor(eye_crop, cv2.COLOR_BGR2RGB)
+        # 2. Resize and Transpose C, H, W
+        img_seg = cv2.resize(img_rgb, (256, 256))
+        img_seg = img_seg.transpose((2, 0, 1)) / 255.0
+        # 3. Add Batch Dimension (1, C, H, W) -> FIXES RUNTIME ERROR
+        img_seg_input = np.expand_dims(img_seg, axis=0) 
+        
+        img_seg_t = torch.tensor(img_seg_input, dtype=torch.float32).to(DEVICE)
         
         with torch.no_grad():
             seg_out = seg_model(img_seg_t)
@@ -108,6 +120,7 @@ def process_frame(frame, sequence_buffer):
 
             mask_resized = cv2.resize(pred_mask.astype(np.uint8), (ew, eh), interpolation=cv2.INTER_NEAREST)
 
+            # Build Multi-Color Overlay (Sclera: Green, Iris: Cyan, Pupil: Magenta)
             color_mask = np.zeros_like(eye_crop, dtype=np.uint8)
             if seg_out.shape[1] > 1:
                 color_mask[mask_resized == 1] = [0, 255, 0]    # 🟢 Sclera
@@ -116,11 +129,13 @@ def process_frame(frame, sequence_buffer):
             else:
                 color_mask[mask_resized == 1] = [0, 255, 0]
 
+            # Alpha Blend Mask onto Frame
             overlay = eye_crop.copy()
             has_mask = np.any(color_mask > 0, axis=-1)
             overlay[has_mask] = color_mask[has_mask]
             cv2.addWeighted(overlay, 0.7, eye_crop, 0.3, 0, frame[ey:ey+eh, ex:ex+ew])
 
+            # Pupil feature extraction
             pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
             pupil_ratio = float(np.clip(pupil_pixels / (ew * eh), 0.05, 0.8))
 
@@ -132,6 +147,7 @@ def process_frame(frame, sequence_buffer):
             gaze_coords = gaze_out.squeeze().cpu().tolist()
             gaze_x, gaze_y = float(gaze_coords[0]), float(gaze_coords[1])
 
+        # Draw Eye Zone Box
         cv2.rectangle(frame, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
         cv2.putText(frame, "Eye Segmented Zone", (ex, ey - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
@@ -176,6 +192,7 @@ if loaded_ok:
         video_placeholder = st.empty()
 
     if uploaded_video is not None:
+        # Save temp file for OpenCV reading
         temp_path = Path("temp_demo_video.mp4")
         with open(temp_path, "wb") as f:
             f.write(uploaded_video.read())
@@ -192,12 +209,15 @@ if loaded_ok:
                 frame = cv2.resize(frame, (640, 480))
                 processed_frame, gx, gy, emotion = process_frame(frame, sequence_buffer)
 
+                # Update UI
                 video_placeholder.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
                 emotion_metric.metric(label="🧠 Predicted Emotion", value=emotion)
                 gaze_metric.code(f"Gaze Vector (X, Y):\n({gx:.2f}, {gy:.2f})")
 
-                time.sleep(0.01)
+                time.sleep(0.01) # Smooth playback
 
             cap.release()
             if temp_path.exists():
                 temp_path.unlink()
+else:
+    st.warning("Please ensure model files (`.pth`) and `gaze_scaler.pkl` exist in the repository or app folder.")
