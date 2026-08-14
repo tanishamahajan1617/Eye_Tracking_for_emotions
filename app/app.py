@@ -84,7 +84,7 @@ GAZE_HISTORY = []
 SEQUENCE_LENGTH = 30
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
 
-# --- 💻 CORE ANALYTICS ENGINE ---
+# --- 💻 CORE ANALYTICS ENGINE (UNET POWERED BOX) ---
 def local_process_frame(frame):
     global GAZE_HISTORY
     eye_detected = False
@@ -92,49 +92,23 @@ def local_process_frame(frame):
     pupil_size = 0.33
     detected_emotion = "Neutral"
     
-    # 📏 Frame resize to standard compact size (Fixes huge frame display)
+    # Standardize input frame size
     frame = cv2.resize(frame, (640, 480))
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     h, w, _ = frame.shape
-    
-    # Compact Default Fallback Box for Eye Region
-    ew_default, eh_default = int(w * 0.22), int(h * 0.16)
-    ex, ey, ew, eh = int(w * 0.39), int(h * 0.30), ew_default, eh_default
 
-    # 🔒 Safe Cascade Classifier Loading with Strict Bounds
-    eye_cascade = None
-    if hasattr(cv2, 'CascadeClassifier'):
+    # Focus Zone around eye level (25%-75% Width, 20%-60% Height)
+    crop_x1, crop_y1 = int(w * 0.25), int(h * 0.20)
+    crop_x2, crop_y2 = int(w * 0.75), int(h * 0.60)
+    eye_zone = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+
+    bbox_coords = None
+
+    # 1. UNet Segmentation Based Precise Bounding Box & Color Highlights
+    if seg_model is not None and eye_zone.size > 0:
         try:
-            cascade_path = cv2.data.haarcascades + 'haarcascade_eye.xml'
-            eye_cascade = cv2.CascadeClassifier(cascade_path)
-        except Exception:
-            eye_cascade = None
-
-    if eye_cascade is not None and not eye_cascade.empty():
-        detected_eyes = eye_cascade.detectMultiScale(
-            gray, 
-            scaleFactor=1.1,     
-            minNeighbors=6,      
-            minSize=(25, 25),
-            maxSize=(int(w * 0.28), int(h * 0.22)) # Tight bounding box
-        )
-        
-        valid_eyes = []
-        for (x, y, bw, bh) in detected_eyes:
-            if (h * 0.20 < y < h * 0.50) and (w * 0.20 < x < w * 0.70):
-                valid_eyes.append((x, y, bw, bh))
-        
-        if len(valid_eyes) > 0:
-            ex, ey, ew, eh = valid_eyes[0]
-            eye_detected = True
-
-    eye_crop = frame[ey:ey+eh, ex:ex+ew]
-    
-    # 1. UNet 4-Class Segmentation Mask & Multi-Color Overlay
-    if seg_model is not None and eye_crop.size > 0:
-        try:
-            img_t = cv2.resize(eye_crop, (256, 256)).transpose((2, 0, 1)) / 255.0
+            img_t = cv2.resize(eye_zone, (256, 256)).transpose((2, 0, 1)) / 255.0
             img_t = torch.tensor([img_t], dtype=torch.float32).to(DEVICE)
+            
             with torch.no_grad():
                 seg_out = seg_model(img_t)
                 
@@ -142,42 +116,68 @@ def local_process_frame(frame):
                     pred_mask = torch.argmax(seg_out, dim=1).squeeze().cpu().numpy()
                 else:
                     pred_mask = (torch.sigmoid(seg_out).squeeze().cpu().numpy() > 0.5).astype(np.uint8)
-                
-                mask_resized = cv2.resize(pred_mask.astype(np.uint8), (ew, eh), interpolation=cv2.INTER_NEAREST)
-                
-                pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
-                pupil_size = float(np.clip(pupil_pixels / (ew * eh), 0.05, 0.8))
 
-                color_mask = np.zeros((eh, ew, 3), dtype=np.uint8)
-                
+                # Resize predicted mask back to eye_zone dimensions
+                zh, zw, _ = eye_zone.shape
+                mask_resized = cv2.resize(pred_mask.astype(np.uint8), (zw, zh), interpolation=cv2.INTER_NEAREST)
+
+                # Binary mask for all non-background eye pixels
+                eye_binary_mask = (mask_resized > 0).astype(np.uint8) * 255
+
+                # 🎯 Create Bounding Box Directly From UNet Segmentation Mask Contours
+                contours, _ = cv2.findContours(eye_binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    c = max(contours, key=cv2.contourArea)
+                    if cv2.contourArea(c) > 100:  # Noise threshold filter
+                        bx, by, bw, bh = cv2.boundingRect(c)
+                        # Translate crop coordinates back to main frame space
+                        bbox_coords = (crop_x1 + bx, crop_y1 + by, bw, bh)
+                        eye_detected = True
+
+                # Pupil size calculation for features
+                pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
+                pupil_size = float(np.clip(pupil_pixels / (zw * zh), 0.05, 0.8))
+
+                # Color Palette Highlights (4 Classes)
+                color_mask = np.zeros_like(eye_zone, dtype=np.uint8)
                 if seg_out.shape[1] > 1:
                     color_mask[mask_resized == 1] = [0, 255, 0]    # Class 1 (Sclera)   -> Green
                     color_mask[mask_resized == 2] = [255, 255, 0]  # Class 2 (Iris)     -> Cyan
                     color_mask[mask_resized == 3] = [255, 0, 255]  # Class 3 (Pupil)    -> Magenta
                 else:
-                    color_mask[mask_resized == 1] = [180, 105, 255] 
-                
-                overlay = frame[ey:ey+eh, ex:ex+ew].copy()
+                    color_mask[mask_resized == 1] = [180, 105, 255]
+
+                # Overlay segmented colors on frame
+                overlay = eye_zone.copy()
                 has_features = np.any(color_mask > 0, axis=-1)
                 overlay[has_features] = color_mask[has_features]
-                
-                cv2.addWeighted(overlay, 0.65, frame[ey:ey+eh, ex:ex+ew], 0.35, 0, frame[ey:ey+eh, ex:ex+ew])
-                eye_detected = True
-        except Exception: 
+                cv2.addWeighted(overlay, 0.65, eye_zone, 0.35, 0, frame[crop_y1:crop_y2, crop_x1:crop_x2])
+
+        except Exception:
             pupil_size = 0.33
-    
-    # 2. Gaze Estimation Pipeline
-    if gaze_model is not None and eye_crop.size > 0:
+
+    # 2. Draw UNet Derived Green Bounding Box
+    if bbox_coords is not None:
+        bx, by, bw, bh = bbox_coords
+        # Add slight padding around detected eye mask
+        pad = 5
+        cv2.rectangle(
+            frame, 
+            (max(0, bx - pad), max(0, by - pad)), 
+            (min(w, bx + bw + pad), min(h, by + bh + pad)), 
+            (0, 255, 0), 
+            2
+        )
+
+    # 3. Gaze Estimation
+    if gaze_model is not None and eye_zone.size > 0:
         try:
-            gaze_input = cv2.resize(eye_crop, (64, 64)).transpose((2, 0, 1)) / 255.0
+            gaze_input = cv2.resize(eye_zone, (64, 64)).transpose((2, 0, 1)) / 255.0
             gaze_input = torch.tensor([gaze_input], dtype=torch.float32).to(DEVICE)
             with torch.no_grad():
                 gaze_out = gaze_model(gaze_input)
                 gaze_vectors = gaze_out.squeeze().cpu().tolist()
         except Exception: pass
-
-    # Tight Bounding Box
-    cv2.rectangle(frame, (ex, ey), (ex+ew, ey+eh), (0, 255, 0), 2)
 
     current_features = [float(gaze_vectors[0]), float(gaze_vectors[1]), float(pupil_size)]
     
@@ -185,7 +185,7 @@ def local_process_frame(frame):
     if len(GAZE_HISTORY) > SEQUENCE_LENGTH: 
         GAZE_HISTORY.pop(0)
     
-    # 3. Emotion LSTM Inference
+    # 4. Emotion Prediction (30-frame sequence)
     if emotion_model is not None and len(GAZE_HISTORY) == SEQUENCE_LENGTH:
         try:
             raw_seq = np.array(GAZE_HISTORY, dtype=np.float32)
@@ -213,6 +213,7 @@ class EyeTrackerVideoProcessor(VideoProcessorBase):
         
         processed_frame, gaze, detected, emotion = local_process_frame(img)
         
+        # Live status overlays
         cv2.putText(
             processed_frame, 
             f"Emotion: {emotion}", 
@@ -239,7 +240,7 @@ class EyeTrackerVideoProcessor(VideoProcessorBase):
 # --- 🖥️ STREAMLIT UI LAYOUT & CSS STYLING ---
 st.set_page_config(page_title="Vision AI Production Node", layout="wide")
 
-# CSS to force video window to be small & centered
+# Center and control size of the WebRTC player
 st.markdown("""
     <style>
     .element-container iframe {
@@ -257,7 +258,7 @@ tab_live, tab_video = st.tabs(["📡 Continuous Live Feed", "🎥 File Video Ana
 
 with tab_live:
     st.subheader("🔴 Real-Time WebRTC Eye Tracking & Segmentation")
-    st.write("Click **START** to open camera feed. Features: **4 Segmentation Mask Colors**, **Gaze**, and **LSTM Emotion State**.")
+    st.write("Click **START** to open camera feed. Pipeline running **UNet Segmentation Mask**, **Gaze Estimation**, and **LSTM Emotion Classification**.")
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
