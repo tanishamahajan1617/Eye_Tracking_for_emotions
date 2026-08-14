@@ -7,19 +7,17 @@ import joblib
 import time
 import gdown
 import sys
-import os
+import importlib
 from pathlib import Path
 
-# --- 1. SAFE MEDIAPIPE FACE MESH IMPORT ---
+# --- 1. SAFE & DYNAMIC MEDIAPIPE FACE MESH IMPORT ---
 import mediapipe as mp
 
-try:
-    mp_face_mesh = mp.solutions.face_mesh
-except AttributeError:
-    import importlib
-    mp_face_mesh = importlib.import_module('mediapipe.python.solutions.face_mesh')
+face_mesh_module = getattr(mp.solutions, 'face_mesh', None)
+if face_mesh_module is None:
+    face_mesh_module = importlib.import_module('mediapipe.python.solutions.face_mesh')
 
-face_mesh = mp_face_mesh.FaceMesh(
+face_mesh = face_mesh_module.FaceMesh(
     static_image_mode=False,
     max_num_faces=1,
     refine_landmarks=True,
@@ -140,7 +138,7 @@ def extract_dynamic_eye_region(frame):
     except Exception:
         pass
 
-    # Tighter fallback tightly cropped to eye band only
+    # Tight fallback cropped directly to the eye band
     return int(w * 0.15), int(h * 0.32), int(w * 0.70), int(h * 0.18)
 
 # --- 6. FRAME PROCESSING FUNCTION ---
@@ -260,8 +258,15 @@ if loaded_ok:
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(str(temp_output), fourcc, fps, (width, height))
+            # --- H.264 COMPATIBLE CODEC FIX FOR BROWSERS ---
+            try:
+                fourcc = cv2.VideoWriter_fourcc(*'H264')
+                out = cv2.VideoWriter(str(temp_output), fourcc, fps, (width, height))
+                if not out.isOpened():
+                    raise Exception("H264 unavailable")
+            except Exception:
+                fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                out = cv2.VideoWriter(str(temp_output), fourcc, fps, (width, height))
 
             progress_bar = st.progress(0, text="🤖 Processing Frames with MediaPipe & UNet...")
             
@@ -291,10 +296,10 @@ if loaded_ok:
 
             st.success("✅ AI Processing Complete!")
             
-            # Display rendered processed video with full player controls
+            # --- RENDER WITH EXPLICIT MP4 MIME TYPE ---
             with open(temp_output, 'rb') as v_file:
                 video_bytes = v_file.read()
-                st.video(video_bytes)
+                st.video(video_bytes, format="video/mp4")
 
             emotion_metric.metric(label="🧠 Final Emotion Prediction", value=current_emotion)
 
