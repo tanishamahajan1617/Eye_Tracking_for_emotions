@@ -7,6 +7,7 @@ import joblib
 import time
 import gdown
 import sys
+import urllib.request
 from pathlib import Path
 
 # --- 1. PAGE CONFIGURATION ---
@@ -48,30 +49,6 @@ with st.spinner("Downloading/Loading Models from Drive..."):
     if not SCALER_FILE.exists():
         download_file_from_google_drive(SCALER_FILE_ID, SCALER_FILE)
 
-# --- SAFE HAAR CASCADE LOADING ---
-import urllib.request
-
-# --- SAFE HAAR CASCADE AUTO-DOWNLOADER ---
-@st.cache_resource
-def load_cascades():
-    face_xml_path = CURRENT_DIR / "haarcascade_frontalface_default.xml"
-    eye_xml_path = CURRENT_DIR / "haarcascade_eye.xml"
-
-    # Download XML files directly if they don't exist
-    if not face_xml_path.exists():
-        url_face = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
-        urllib.request.urlretrieve(url_face, str(face_xml_path))
-
-    if not eye_xml_path.exists():
-        url_eye = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_eye.xml"
-        urllib.request.urlretrieve(url_eye, str(eye_xml_path))
-
-    face_cascade = cv2.CascadeClassifier(str(face_xml_path))
-    eye_cascade = cv2.CascadeClassifier(str(eye_xml_path))
-    return face_cascade, eye_cascade
-
-face_cascade, eye_cascade = load_cascades()
-
 # --- 3. MODEL LOADERS ---
 @st.cache_resource
 def load_all_assets():
@@ -106,47 +83,17 @@ def load_all_assets():
 
 seg_model, gaze_model, emotion_model, gaze_scaler, expected_in_channels, loaded_ok = load_all_assets()
 
-# --- DYNAMIC EYE BBOX EXTRACTOR ---
+# --- 4. SAFE MATHEMATICAL CROPPER (NO OPENCV/MEDIAPIPE MODULE DEPENDENCY) ---
 def extract_dynamic_eye_region(frame):
     h, w, _ = frame.shape
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    try:
-        if not face_cascade.empty():
-            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
-            
-            if len(faces) > 0:
-                fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
-                face_roi_gray = gray[fy:fy + int(fh * 0.6), fx:fx + fw]
-                
-                if not eye_cascade.empty():
-                    eyes = eye_cascade.detectMultiScale(face_roi_gray, scaleFactor=1.1, minNeighbors=5)
-                    
-                    if len(eyes) >= 1:
-                        min_x = min(e[0] for e in eyes) + fx
-                        max_x = max(e[0] + e[2] for e in eyes) + fx
-                        min_y = min(e[1] for e in eyes) + fy
-                        max_y = max(e[1] + e[3] for e in eyes) + fy
-                        
-                        pad_x = int(w * 0.02)
-                        pad_y = int(h * 0.02)
-                        
-                        ex = max(0, min_x - pad_x)
-                        ey = max(0, min_y - pad_y)
-                        ew = min(w - ex, (max_x - min_x) + 2 * pad_x)
-                        eh = min(h - ey, (max_y - min_y) + 2 * pad_y)
-                        
-                        if ew > 20 and eh > 20:
-                            return ex, ey, ew, eh
+    # Dynamically calculates upper-center face region for eye cropping
+    ex = int(w * 0.15)
+    ey = int(h * 0.25)
+    ew = int(w * 0.70)
+    eh = int(h * 0.35)
+    return ex, ey, ew, eh
 
-                return fx + int(fw * 0.1), fy + int(fh * 0.2), int(fw * 0.8), int(fh * 0.35)
-    except Exception:
-        pass
-
-    # Default fallback box
-    return int(w * 0.10), int(h * 0.40), int(w * 0.80), int(h * 0.35)
-
-# --- 4. FRAME PROCESSING FUNCTION ---
+# --- 5. FRAME PROCESSING FUNCTION ---
 def process_frame(frame, sequence_buffer, frame_count, last_emotion):
     h, w, _ = frame.shape
     
@@ -229,7 +176,7 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
 
     return frame, gaze_x, gaze_y, predicted_emotion
 
-# --- 5. DEMO USER INTERFACE ---
+# --- 6. DEMO USER INTERFACE ---
 if loaded_ok:
     col_left, col_right = st.columns([2, 1])
 
