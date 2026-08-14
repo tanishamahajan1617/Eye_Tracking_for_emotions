@@ -49,18 +49,25 @@ with st.spinner("Downloading/Loading Models from Drive..."):
         download_file_from_google_drive(SCALER_FILE_ID, SCALER_FILE)
 
 # --- SAFE HAAR CASCADE LOADING ---
+import urllib.request
+
+# --- SAFE HAAR CASCADE AUTO-DOWNLOADER ---
+@st.cache_resource
 def load_cascades():
-    cascade_dir = getattr(cv2, 'data', None)
-    if cascade_dir is not None and hasattr(cascade_dir, 'haarcascades'):
-        path_prefix = cascade_dir.haarcascades
-    else:
-        path_prefix = cv2.__path__[0] + '/data/'
+    face_xml_path = CURRENT_DIR / "haarcascade_frontalface_default.xml"
+    eye_xml_path = CURRENT_DIR / "haarcascade_eye.xml"
 
-    face_path = path_prefix + 'haarcascade_frontalface_default.xml'
-    eye_path = path_prefix + 'haarcascade_eye.xml'
+    # Download XML files directly if they don't exist
+    if not face_xml_path.exists():
+        url_face = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+        urllib.request.urlretrieve(url_face, str(face_xml_path))
 
-    face_cascade = cv2.CascadeClassifier(face_path)
-    eye_cascade = cv2.CascadeClassifier(eye_path)
+    if not eye_xml_path.exists():
+        url_eye = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_eye.xml"
+        urllib.request.urlretrieve(url_eye, str(eye_xml_path))
+
+    face_cascade = cv2.CascadeClassifier(str(face_xml_path))
+    eye_cascade = cv2.CascadeClassifier(str(eye_xml_path))
     return face_cascade, eye_cascade
 
 face_cascade, eye_cascade = load_cascades()
