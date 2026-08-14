@@ -81,26 +81,18 @@ def load_vision_models():
 seg_model, gaze_model, emotion_model, gaze_scaler = load_vision_models()
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
 
-# --- 🎯 ROBUST CASCADE LOADER (STREAMLIT CLOUD SAFE) ---
-def load_eye_cascade():
+# --- 🎯 ROBUST EYE & FACE CASCADE LOADER ---
+def load_cascades():
     try:
-        cascade_path = cv2.data.haarcascades + 'haarcascade_eye.xml'
-        cascade = cv2.CascadeClassifier(cascade_path)
-        if not cascade.empty():
-            return cascade
+        eye_path = cv2.data.haarcascades + 'haarcascade_eye.xml'
+        face_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        return cv2.CascadeClassifier(eye_path), cv2.CascadeClassifier(face_path)
     except Exception:
-        pass
-    
-    # Cloud Fallback Path Check
-    alt_path = os.path.join(cv2.__path__[0], 'data', 'haarcascade_eye.xml')
-    if os.path.exists(alt_path):
-        return cv2.CascadeClassifier(alt_path)
-    
-    return None
+        return None, None
 
-eye_cascade = load_eye_cascade()
+eye_cascade, face_cascade = load_cascades()
 
-# --- 💻 UNET ALL-PART HIGHLIGHTING PROCESSING PIPELINE ---
+# --- 💻 ACCURATE EYE SEGMENTATION & GAZE PIPELINE ---
 def local_process_frame(frame, gaze_history_buffer):
     frame = cv2.resize(frame, (640, 480))
     h, w, _ = frame.shape
@@ -111,23 +103,25 @@ def local_process_frame(frame, gaze_history_buffer):
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
-    # Safe Cascade Detection
-    if eye_cascade is not None:
-        eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
-    else:
-        eyes = ()
+    eyes_coords = []
+    
+    # Cascade Eye Detection
+    if eye_cascade is not None and not eye_cascade.empty():
+        detected_eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=6, minSize=(50, 50))
+        for (ex, ey, ew, eh) in detected_eyes:
+            # Shift detected box downwards slightly to capture actual Eye Ball instead of Eyebrow
+            ey_shifted = min(h - eh, ey + int(eh * 0.25))
+            eyes_coords.append((ex, ey_shifted, ew, eh))
 
-    if len(eyes) == 0:
-        # Fallback Crop around upper-center region
-        crop_x1, crop_y1 = int(w * 0.20), int(h * 0.20)
-        crop_w, crop_h = int(w * 0.60), int(h * 0.35)
+    # Fallback Center Crop if Cascade misfires/fails
+    if len(eyes_coords) == 0:
+        crop_x1, crop_y1 = int(w * 0.15), int(h * 0.35)
+        crop_w, crop_h = int(w * 0.70), int(h * 0.45)
         eyes_coords = [(crop_x1, crop_y1, crop_w, crop_h)]
-    else:
-        eyes_coords = eyes
 
     for (ex, ey, ew, eh) in eyes_coords[:2]:
         eye_crop = frame[ey:ey+eh, ex:ex+ew]
-        if eye_crop.size == 0: continue
+        if eye_crop.size == 0 or eye_crop.shape[0] < 20 or eye_crop.shape[1] < 20: continue
 
         # --- 👁️ UNET EYE PARTS SEGMENTATION & HIGHLIGHTING ---
         if seg_model is not None:
@@ -141,11 +135,11 @@ def local_process_frame(frame, gaze_history_buffer):
                     if seg_out.shape[1] > 1:
                         pred_mask = torch.argmax(seg_out, dim=1).squeeze().cpu().numpy()
                     else:
-                        pred_mask = (torch.sigmoid(seg_out).squeeze().cpu().numpy() > 0.35).astype(np.uint8)
+                        pred_mask = (torch.sigmoid(seg_out).squeeze().cpu().numpy() > 0.25).astype(np.uint8)
 
                     mask_resized = cv2.resize(pred_mask.astype(np.uint8), (ew, eh), interpolation=cv2.INTER_NEAREST)
 
-                    # Multi-Color Overlay for Each UNet Channel
+                    # Multi-Color Highlight Masks
                     color_mask = np.zeros_like(eye_crop, dtype=np.uint8)
                     
                     if seg_out.shape[1] > 1:
@@ -153,21 +147,21 @@ def local_process_frame(frame, gaze_history_buffer):
                         color_mask[mask_resized == 2] = [255, 255, 0]  # 🩵 Iris (Cyan)
                         color_mask[mask_resized == 3] = [255, 0, 255]  # 🩷 Pupil (Magenta)
                     else:
-                        color_mask[mask_resized == 1] = [0, 255, 0]    # 🟢 Eye Region Highlight
+                        color_mask[mask_resized == 1] = [0, 255, 0]    # 🟢 Full Eye Region
 
-                    # Blend Mask onto original frame
+                    # Overlay blend
                     overlay = eye_crop.copy()
                     has_features = np.any(color_mask > 0, axis=-1)
                     overlay[has_features] = color_mask[has_features]
                     
-                    cv2.addWeighted(overlay, 0.70, eye_crop, 0.30, 0, frame[ey:ey+eh, ex:ex+ew])
+                    cv2.addWeighted(overlay, 0.75, eye_crop, 0.25, 0, frame[ey:ey+eh, ex:ex+ew])
 
                     pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
                     pupil_size = float(np.clip(pupil_pixels / (ew * eh), 0.05, 0.8))
             except Exception:
                 pupil_size = 0.33
 
-        # Draw Green Box & Eye Label
+        # Green Box & Label on Actual Eye Location
         cv2.rectangle(frame, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
         cv2.putText(frame, "Eye Segmented", (ex, max(15, ey - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
 
