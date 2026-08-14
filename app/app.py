@@ -81,8 +81,24 @@ def load_vision_models():
 seg_model, gaze_model, emotion_model, gaze_scaler = load_vision_models()
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
 
-# --- 🎯 EYE CASCADE DETECTOR ---
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+# --- 🎯 ROBUST CASCADE LOADER (STREAMLIT CLOUD SAFE) ---
+def load_eye_cascade():
+    try:
+        cascade_path = cv2.data.haarcascades + 'haarcascade_eye.xml'
+        cascade = cv2.CascadeClassifier(cascade_path)
+        if not cascade.empty():
+            return cascade
+    except Exception:
+        pass
+    
+    # Cloud Fallback Path Check
+    alt_path = os.path.join(cv2.__path__[0], 'data', 'haarcascade_eye.xml')
+    if os.path.exists(alt_path):
+        return cv2.CascadeClassifier(alt_path)
+    
+    return None
+
+eye_cascade = load_eye_cascade()
 
 # --- 💻 UNET ALL-PART HIGHLIGHTING PROCESSING PIPELINE ---
 def local_process_frame(frame, gaze_history_buffer):
@@ -94,7 +110,12 @@ def local_process_frame(frame, gaze_history_buffer):
     detected_emotion = "Calculating..."
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
+    
+    # Safe Cascade Detection
+    if eye_cascade is not None:
+        eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
+    else:
+        eyes = ()
 
     if len(eyes) == 0:
         # Fallback Crop around upper-center region
@@ -117,7 +138,6 @@ def local_process_frame(frame, gaze_history_buffer):
                 with torch.no_grad():
                     seg_out = seg_model(img_t)
                     
-                    # Multi-class output handling
                     if seg_out.shape[1] > 1:
                         pred_mask = torch.argmax(seg_out, dim=1).squeeze().cpu().numpy()
                     else:
@@ -125,7 +145,7 @@ def local_process_frame(frame, gaze_history_buffer):
 
                     mask_resized = cv2.resize(pred_mask.astype(np.uint8), (ew, eh), interpolation=cv2.INTER_NEAREST)
 
-                    # Distinct Colors for Each UNet Channel
+                    # Multi-Color Overlay for Each UNet Channel
                     color_mask = np.zeros_like(eye_crop, dtype=np.uint8)
                     
                     if seg_out.shape[1] > 1:
@@ -140,7 +160,6 @@ def local_process_frame(frame, gaze_history_buffer):
                     has_features = np.any(color_mask > 0, axis=-1)
                     overlay[has_features] = color_mask[has_features]
                     
-                    # Apply Alpha Blending for clear visibility
                     cv2.addWeighted(overlay, 0.70, eye_crop, 0.30, 0, frame[ey:ey+eh, ex:ex+ew])
 
                     pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
