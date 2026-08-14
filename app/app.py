@@ -48,9 +48,22 @@ with st.spinner("Downloading/Loading Models from Drive..."):
     if not SCALER_FILE.exists():
         download_file_from_google_drive(SCALER_FILE_ID, SCALER_FILE)
 
-# Load OpenCV Cascade Detectors for Face/Eyes
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+# --- SAFE HAAR CASCADE LOADING ---
+def load_cascades():
+    cascade_dir = getattr(cv2, 'data', None)
+    if cascade_dir is not None and hasattr(cascade_dir, 'haarcascades'):
+        path_prefix = cascade_dir.haarcascades
+    else:
+        path_prefix = cv2.__path__[0] + '/data/'
+
+    face_path = path_prefix + 'haarcascade_frontalface_default.xml'
+    eye_path = path_prefix + 'haarcascade_eye.xml'
+
+    face_cascade = cv2.CascadeClassifier(face_path)
+    eye_cascade = cv2.CascadeClassifier(eye_path)
+    return face_cascade, eye_cascade
+
+face_cascade, eye_cascade = load_cascades()
 
 # --- 3. MODEL LOADERS ---
 @st.cache_resource
@@ -86,52 +99,50 @@ def load_all_assets():
 
 seg_model, gaze_model, emotion_model, gaze_scaler, expected_in_channels, loaded_ok = load_all_assets()
 
-# --- DYNAMIC EYE BBOX EXTRACTOR (OPENCV HARRCASCADE) ---
+# --- DYNAMIC EYE BBOX EXTRACTOR ---
 def extract_dynamic_eye_region(frame):
     h, w, _ = frame.shape
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
-    # Face detection
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
-    
-    if len(faces) > 0:
-        # Pick the largest face
-        fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
-        face_roi_gray = gray[fy:fy + int(fh * 0.6), fx:fx + fw]  # Upper half of face for eyes
-        
-        # Detect eyes in upper face ROI
-        eyes = eye_cascade.detectMultiScale(face_roi_gray, scaleFactor=1.1, minNeighbors=5)
-        
-        if len(eyes) >= 1:
-            # Create a combined bounding box around detected eye region
-            min_x = min(e[0] for e in eyes) + fx
-            max_x = max(e[0] + e[2] for e in eyes) + fx
-            min_y = min(e[1] for e in eyes) + fy
-            max_y = max(e[1] + e[3] for e in eyes) + fy
+    try:
+        if not face_cascade.empty():
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
             
-            # Padding
-            pad_x = int(w * 0.02)
-            pad_y = int(h * 0.02)
-            
-            ex = max(0, min_x - pad_x)
-            ey = max(0, min_y - pad_y)
-            ew = min(w - ex, (max_x - min_x) + 2 * pad_x)
-            eh = min(h - ey, (max_y - min_y) + 2 * pad_y)
-            
-            if ew > 20 and eh > 20:
-                return ex, ey, ew, eh
+            if len(faces) > 0:
+                fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
+                face_roi_gray = gray[fy:fy + int(fh * 0.6), fx:fx + fw]
+                
+                if not eye_cascade.empty():
+                    eyes = eye_cascade.detectMultiScale(face_roi_gray, scaleFactor=1.1, minNeighbors=5)
+                    
+                    if len(eyes) >= 1:
+                        min_x = min(e[0] for e in eyes) + fx
+                        max_x = max(e[0] + e[2] for e in eyes) + fx
+                        min_y = min(e[1] for e in eyes) + fy
+                        max_y = max(e[1] + e[3] for e in eyes) + fy
+                        
+                        pad_x = int(w * 0.02)
+                        pad_y = int(h * 0.02)
+                        
+                        ex = max(0, min_x - pad_x)
+                        ey = max(0, min_y - pad_y)
+                        ew = min(w - ex, (max_x - min_x) + 2 * pad_x)
+                        eh = min(h - ey, (max_y - min_y) + 2 * pad_y)
+                        
+                        if ew > 20 and eh > 20:
+                            return ex, ey, ew, eh
 
-        # Fallback to upper 40% region of the detected face
-        return fx + int(fw * 0.1), fy + int(fh * 0.2), int(fw * 0.8), int(fh * 0.35)
+                return fx + int(fw * 0.1), fy + int(fh * 0.2), int(fw * 0.8), int(fh * 0.35)
+    except Exception:
+        pass
 
-    # Global Fallback (centered eyes estimation)
+    # Default fallback box
     return int(w * 0.10), int(h * 0.40), int(w * 0.80), int(h * 0.35)
 
 # --- 4. FRAME PROCESSING FUNCTION ---
 def process_frame(frame, sequence_buffer, frame_count, last_emotion):
     h, w, _ = frame.shape
     
-    # Dynamic crop
     ex, ey, ew, eh = extract_dynamic_eye_region(frame)
     eye_crop = frame[ey:ey+eh, ex:ex+ew]
 
@@ -173,7 +184,6 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
             has_mask = np.any(color_mask > 0, axis=-1)
             overlay[has_mask] = color_mask[has_mask]
             
-            # Highlight parts inside video frame
             cv2.addWeighted(overlay, 0.6, eye_crop, 0.4, 0, frame[ey:ey+eh, ex:ex+ew])
 
             pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
@@ -194,9 +204,7 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
         cv2.rectangle(frame, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
         cv2.putText(frame, "Segmented Eye Zone", (ex, ey - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-    # Sequence buffering
-    current_step = [gaze_x, gaze_y, pupil_ratio]
-    sequence_buffer.append(current_step)
+    sequence_buffer.append([gaze_x, gaze_y, pupil_ratio])
     if len(sequence_buffer) > 30:
         sequence_buffer.pop(0)
 
