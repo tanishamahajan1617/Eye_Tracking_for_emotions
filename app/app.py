@@ -12,12 +12,20 @@ st.set_page_config(page_title="Eye Tracking & Emotion AI Demo", layout="wide")
 st.title("👁️ Eye Tracking & Emotion Recognition System")
 st.caption("Real-time Eye Segmentation (UNet), Gaze Estimation, and Sequence-based Emotion Classification (LSTM)")
 
-# --- 2. PATHS & DEVICE SETUP ---
-ROOT_DIR = Path(__file__).parent
-WEIGHTS_SEG = ROOT_DIR / "best_unet_model.pth"
-WEIGHTS_GAZE = ROOT_DIR / "best_gaze_model.pth"
-WEIGHTS_EMOTION = ROOT_DIR / "best_emotion_lstm.pth"
-SCALER_FILE = ROOT_DIR / "gaze_scaler.pkl"
+# --- 2. PATHS & DEVICE SETUP (FLEXIBLE ROOT RESOLUTION) ---
+CURRENT_DIR = Path(__file__).parent
+REPO_ROOT = CURRENT_DIR.parent
+
+# Helper function to find weights in either root or /app folder
+def resolve_path(filename):
+    if (REPO_ROOT / filename).exists():
+        return REPO_ROOT / filename
+    return CURRENT_DIR / filename
+
+WEIGHTS_SEG = resolve_path("best_unet_model.pth")
+WEIGHTS_GAZE = resolve_path("best_gaze_model.pth")
+WEIGHTS_EMOTION = resolve_path("best_emotion_lstm.pth")
+SCALER_FILE = resolve_path("gaze_scaler.pkl")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
@@ -184,4 +192,4 @@ if loaded_ok:
             if temp_path.exists():
                 temp_path.unlink()
 else:
-    st.warning("Please ensure model files (`.pth`) and `gaze_scaler.pkl` exist in the project directory.")
+    st.warning("Please ensure model files (`.pth`) and `gaze_scaler.pkl` exist in the repository or app folder.")
