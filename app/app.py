@@ -267,6 +267,7 @@ with tab_live:
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=EyeTrackerVideoProcessor,
+            media_stream_constraints={"video": True, "audio": False},  # Fast STUN/WebRTC connection
             async_processing=True,
         )
 
@@ -274,12 +275,14 @@ with tab_video:
     st.subheader("Upload Target Video File")
     uploaded = st.file_uploader("Choose a video file...", type=["mp4", "mov", "avi"])
     if uploaded is not None:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(uploaded.read())
             tmp_path = tmp.name
+        
         cap = cv2.VideoCapture(tmp_path)
         col_display, col_metrics = st.columns(2)
-        with col_display: video_placeholder = st.empty()
+        with col_display: 
+            video_placeholder = st.empty()
         with col_metrics:
             emotion_metric = st.empty()
             gaze_metric = st.empty()
@@ -287,12 +290,19 @@ with tab_video:
         if st.button("Trigger Computation Node", type="primary"):
             while cap.isOpened():
                 ret, frame = cap.read()
-                if not ret: break
+                if not ret: 
+                    break
+                
                 processed_frame, gaze, detected, emotion = local_process_frame(frame)
+                
                 emotion_metric.metric(label="🧠 Predicted State", value=str(emotion))
                 gaze_metric.code(f"Gaze (X,Y,Pupil):\n{gaze}")
                 video_placeholder.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
+                
                 time.sleep(0.01)
+                
             cap.release()
-            try: os.unlink(tmp_path)
-            except Exception: pass
+            try: 
+                os.unlink(tmp_path)
+            except Exception: 
+                pass
