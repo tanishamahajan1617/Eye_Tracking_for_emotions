@@ -81,77 +81,88 @@ def load_vision_models():
 seg_model, gaze_model, emotion_model, gaze_scaler = load_vision_models()
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
 
-# --- 💻 ROBUST UNET & GAZE PROCESSING PIPELINE ---
+# --- 🎯 EYE CASCADE DETECTOR ---
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+
+# --- 💻 UNET ALL-PART HIGHLIGHTING PROCESSING PIPELINE ---
 def local_process_frame(frame, gaze_history_buffer):
     frame = cv2.resize(frame, (640, 480))
     h, w, _ = frame.shape
 
-    gaze_vectors = [0.52, 0.52]
+    gaze_vectors = [0.5, 0.5]
     pupil_size = 0.33
     detected_emotion = "Calculating..."
 
-    # Contrast Adjustment for better UNet Eye Detection in lighting variations
-    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-    l, a, b_ch = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    cl = clahe.apply(l)
-    enhanced_frame = cv2.cvtColor(cv2.merge((cl, a, b_ch)), cv2.COLOR_LAB2BGR)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
 
-    # 1. UNET SEGMENTATION & OVERLAY
-    if seg_model is not None:
-        try:
-            img_t = cv2.resize(enhanced_frame, (256, 256)).transpose((2, 0, 1)) / 255.0
-            img_t = torch.tensor([img_t], dtype=torch.float32).to(DEVICE)
-            
-            with torch.no_grad():
-                seg_out = seg_model(img_t)
-                if seg_out.shape[1] > 1:
-                    pred_mask = torch.argmax(seg_out, dim=1).squeeze().cpu().numpy()
-                else:
-                    pred_mask = (torch.sigmoid(seg_out).squeeze().cpu().numpy() > 0.4).astype(np.uint8)
+    if len(eyes) == 0:
+        # Fallback Crop around upper-center region
+        crop_x1, crop_y1 = int(w * 0.20), int(h * 0.20)
+        crop_w, crop_h = int(w * 0.60), int(h * 0.35)
+        eyes_coords = [(crop_x1, crop_y1, crop_w, crop_h)]
+    else:
+        eyes_coords = eyes
 
-                mask_resized = cv2.resize(pred_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+    for (ex, ey, ew, eh) in eyes_coords[:2]:
+        eye_crop = frame[ey:ey+eh, ex:ex+ew]
+        if eye_crop.size == 0: continue
 
-                # Generate Dynamic Segmentation Colors
-                color_mask = np.zeros_like(frame, dtype=np.uint8)
-                if seg_out.shape[1] > 1:
-                    color_mask[mask_resized == 1] = [0, 255, 0]    # Sclera (Green)
-                    color_mask[mask_resized == 2] = [255, 255, 0]  # Iris (Cyan)
-                    color_mask[mask_resized == 3] = [255, 0, 255]  # Pupil (Magenta)
-                else:
-                    color_mask[mask_resized == 1] = [0, 255, 255]  # Bright Yellow Mask
-
-                # Draw Overlay
-                has_features = np.any(color_mask > 0, axis=-1)
-                overlay = frame.copy()
-                overlay[has_features] = color_mask[has_features]
-                cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-
-                # Draw Bounding Boxes around Eye Contours
-                eye_binary = (mask_resized > 0).astype(np.uint8) * 255
-                contours, _ = cv2.findContours(eye_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # --- 👁️ UNET EYE PARTS SEGMENTATION & HIGHLIGHTING ---
+        if seg_model is not None:
+            try:
+                img_t = cv2.resize(eye_crop, (256, 256)).transpose((2, 0, 1)) / 255.0
+                img_t = torch.tensor([img_t], dtype=torch.float32).to(DEVICE)
                 
-                for c in contours:
-                    if cv2.contourArea(c) > 15: # Lower sensitivity threshold so eyes never miss
-                        bx, by, bw, bh = cv2.boundingRect(c)
-                        cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (0, 255, 0), 2)
+                with torch.no_grad():
+                    seg_out = seg_model(img_t)
+                    
+                    # Multi-class output handling
+                    if seg_out.shape[1] > 1:
+                        pred_mask = torch.argmax(seg_out, dim=1).squeeze().cpu().numpy()
+                    else:
+                        pred_mask = (torch.sigmoid(seg_out).squeeze().cpu().numpy() > 0.35).astype(np.uint8)
 
-                pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
-                pupil_size = float(np.clip(pupil_pixels / (w * h), 0.05, 0.8))
-        except Exception:
-            pupil_size = 0.33
+                    mask_resized = cv2.resize(pred_mask.astype(np.uint8), (ew, eh), interpolation=cv2.INTER_NEAREST)
 
-    # 2. GAZE MODEL INFERENCE
-    if gaze_model is not None:
-        try:
-            gaze_input = cv2.resize(frame, (64, 64)).transpose((2, 0, 1)) / 255.0
-            gaze_input = torch.tensor([gaze_input], dtype=torch.float32).to(DEVICE)
-            with torch.no_grad():
-                gaze_out = gaze_model(gaze_input)
-                gaze_vectors = gaze_out.squeeze().cpu().tolist()
-        except Exception: pass
+                    # Distinct Colors for Each UNet Channel
+                    color_mask = np.zeros_like(eye_crop, dtype=np.uint8)
+                    
+                    if seg_out.shape[1] > 1:
+                        color_mask[mask_resized == 1] = [0, 255, 0]    # 🟢 Sclera (Green)
+                        color_mask[mask_resized == 2] = [255, 255, 0]  # 🩵 Iris (Cyan)
+                        color_mask[mask_resized == 3] = [255, 0, 255]  # 🩷 Pupil (Magenta)
+                    else:
+                        color_mask[mask_resized == 1] = [0, 255, 0]    # 🟢 Eye Region Highlight
 
-    # 3. SEQUENCE BUFFER & LSTM EMOTION
+                    # Blend Mask onto original frame
+                    overlay = eye_crop.copy()
+                    has_features = np.any(color_mask > 0, axis=-1)
+                    overlay[has_features] = color_mask[has_features]
+                    
+                    # Apply Alpha Blending for clear visibility
+                    cv2.addWeighted(overlay, 0.70, eye_crop, 0.30, 0, frame[ey:ey+eh, ex:ex+ew])
+
+                    pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
+                    pupil_size = float(np.clip(pupil_pixels / (ew * eh), 0.05, 0.8))
+            except Exception:
+                pupil_size = 0.33
+
+        # Draw Green Box & Eye Label
+        cv2.rectangle(frame, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
+        cv2.putText(frame, "Eye Segmented", (ex, max(15, ey - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+
+        # --- 🎯 GAZE PREDICTION ---
+        if gaze_model is not None:
+            try:
+                gaze_input = cv2.resize(eye_crop, (64, 64)).transpose((2, 0, 1)) / 255.0
+                gaze_input = torch.tensor([gaze_input], dtype=torch.float32).to(DEVICE)
+                with torch.no_grad():
+                    gaze_out = gaze_model(gaze_input)
+                    gaze_vectors = gaze_out.squeeze().cpu().tolist()
+            except Exception: pass
+
+    # --- 🧠 SEQUENCE BUFFER & EMOTION PREDICTION ---
     current_features = [float(gaze_vectors[0]), float(gaze_vectors[1]), float(pupil_size)]
     gaze_history_buffer.append(current_features)
     if len(gaze_history_buffer) > 30:
@@ -170,7 +181,7 @@ def local_process_frame(frame, gaze_history_buffer):
         except Exception:
             detected_emotion = "Neutral"
 
-    # UI Text Overlay
+    # UI Visual Text
     cv2.putText(frame, f"Emotion: {detected_emotion}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
     cv2.putText(frame, f"Gaze: ({gaze_vectors[0]:.2f}, {gaze_vectors[1]:.2f})", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -231,6 +242,11 @@ with tab_video:
         with col_display: 
             video_placeholder = st.empty()
         with col_metrics:
+            st.markdown("### 🎨 UNet Color Key")
+            st.markdown("- 🟢 **Sclera:** Green")
+            st.markdown("- 🩵 **Iris:** Cyan")
+            st.markdown("- 🩷 **Pupil:** Magenta")
+            st.markdown("---")
             emotion_metric = st.empty()
             gaze_metric = st.empty()
         
