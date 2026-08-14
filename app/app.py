@@ -14,8 +14,7 @@ from streamlit_webrtc import (
     webrtc_streamer,
     VideoProcessorBase,
     RTCConfiguration,
-    WebRtcMode,
-    ClientSettings
+    WebRtcMode
 )
 
 # Streamlit-WebRTC Logs Suppress
