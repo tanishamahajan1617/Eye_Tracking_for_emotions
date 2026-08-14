@@ -10,7 +10,13 @@ import logging
 import joblib
 import gdown
 from pathlib import Path
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
+from streamlit_webrtc import (
+    webrtc_streamer,
+    VideoProcessorBase,
+    RTCConfiguration,
+    WebRtcMode,
+    ClientSettings
+)
 
 # Streamlit-WebRTC Logs Suppress
 logging.getLogger("streamlit_webrtc").setLevel(logging.CRITICAL)
@@ -76,23 +82,37 @@ def load_vision_models():
 seg_model, gaze_model, emotion_model, gaze_scaler = load_vision_models()
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
 
-# --- 🎥 WEBRTC VIDEO PROCESSOR WORKER WITH LOCAL BUFFER ---
+# --- 🌐 BULLETPROOF RTC & ICE CONFIGURATION ---
 RTC_CONFIGURATION = RTCConfiguration(
     {
         "iceServers": [
             {"urls": ["stun:stun.l.google.com:19302"]},
             {"urls": ["stun:stun1.l.google.com:19302"]},
             {"urls": ["stun:stun2.l.google.com:19302"]},
+            {"urls": ["stun:stun3.l.google.com:19302"]},
+            {"urls": ["stun:stun4.l.google.com:19302"]},
+            {"urls": ["stun:global.stun.twilio.com:3478"]},
+            # Free Relay TURN Fallbacks for Strict Firewalls / Streamlit Cloud
+            {
+                "urls": ["turn:openrelay.metered.ca:80"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject"
+            },
+            {
+                "urls": ["turn:openrelay.metered.ca:443"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject"
+            }
         ]
     }
 )
 
+# --- 🎥 WEBRTC VIDEO PROCESSOR WORKER ---
 class EyeTrackerVideoProcessor(VideoProcessorBase):
     def __init__(self):
-        # Local Worker Memory for Smooth WebRTC Streaming
         self.gaze_history = []
         self.sequence_length = 30
-        self.current_emotion = "Calculating..."
+        self.current_emotion = "Initializing Engine..."
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -108,7 +128,7 @@ class EyeTrackerVideoProcessor(VideoProcessorBase):
         pupil_size = 0.33
         bbox_coords = None
 
-        # 1. UNet Segmentation & Color Masks
+        # 1. UNet Segmentation & Mask Bounding Box
         if seg_model is not None and eye_zone.size > 0:
             try:
                 img_t = cv2.resize(eye_zone, (256, 256)).transpose((2, 0, 1)) / 255.0
@@ -124,7 +144,6 @@ class EyeTrackerVideoProcessor(VideoProcessorBase):
                     zh, zw, _ = eye_zone.shape
                     mask_resized = cv2.resize(pred_mask.astype(np.uint8), (zw, zh), interpolation=cv2.INTER_NEAREST)
 
-                    # Bounding Box
                     eye_binary = (mask_resized > 0).astype(np.uint8) * 255
                     contours, _ = cv2.findContours(eye_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if contours:
@@ -133,16 +152,14 @@ class EyeTrackerVideoProcessor(VideoProcessorBase):
                             bx, by, bw, bh = cv2.boundingRect(c)
                             bbox_coords = (crop_x1 + bx, crop_y1 + by, bw, bh)
 
-                    # Feature Extraction
                     pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
                     pupil_size = float(np.clip(pupil_pixels / (zw * zh), 0.05, 0.8))
 
-                    # Color Overlays
                     color_mask = np.zeros_like(eye_zone, dtype=np.uint8)
                     if seg_out.shape[1] > 1:
-                        color_mask[mask_resized == 1] = [0, 255, 0]    # Green
-                        color_mask[mask_resized == 2] = [255, 255, 0]  # Cyan
-                        color_mask[mask_resized == 3] = [255, 0, 255]  # Magenta
+                        color_mask[mask_resized == 1] = [0, 255, 0]    # Sclera (Green)
+                        color_mask[mask_resized == 2] = [255, 255, 0]  # Iris (Cyan)
+                        color_mask[mask_resized == 3] = [255, 0, 255]  # Pupil (Magenta)
                     else:
                         color_mask[mask_resized == 1] = [180, 105, 255]
 
@@ -153,12 +170,12 @@ class EyeTrackerVideoProcessor(VideoProcessorBase):
             except Exception:
                 pupil_size = 0.33
 
-        # 2. Draw Bounding Box
+        # 2. Draw Eye Bounding Box
         if bbox_coords is not None:
             bx, by, bw, bh = bbox_coords
             cv2.rectangle(img, (bx, by), (bx + bw, by + bh), (0, 255, 0), 2)
 
-        # 3. Gaze Estimation
+        # 3. Gaze Inference
         if gaze_model is not None and eye_zone.size > 0:
             try:
                 gaze_input = cv2.resize(eye_zone, (64, 64)).transpose((2, 0, 1)) / 255.0
@@ -168,13 +185,12 @@ class EyeTrackerVideoProcessor(VideoProcessorBase):
                     gaze_vectors = gaze_out.squeeze().cpu().tolist()
             except Exception: pass
 
-        # Update Frame Sequence inside Instance
+        # 4. State Buffer & Dynamic Emotion Calculation
         current_features = [float(gaze_vectors[0]), float(gaze_vectors[1]), float(pupil_size)]
         self.gaze_history.append(current_features)
         if len(self.gaze_history) > self.sequence_length:
             self.gaze_history.pop(0)
 
-        # 4. Emotion Prediction via LSTM
         if emotion_model is not None and len(self.gaze_history) == self.sequence_length:
             try:
                 raw_seq = np.array(self.gaze_history, dtype=np.float32)
@@ -188,25 +204,9 @@ class EyeTrackerVideoProcessor(VideoProcessorBase):
             except Exception:
                 self.current_emotion = "Neutral"
 
-        # On-screen Overlays
-        cv2.putText(
-            img, 
-            f"Emotion: {self.current_emotion}", 
-            (20, 35), 
-            cv2.FONT_HERSHEY_SIMPLEX, 
-            0.8, 
-            (0, 255, 0), 
-            2
-        )
-        cv2.putText(
-            img, 
-            f"Gaze Vector: ({gaze_vectors[0]:.2f}, {gaze_vectors[1]:.2f})", 
-            (20, 65), 
-            cv2.FONT_HERSHEY_SIMPLEX, 
-            0.5, 
-            (255, 255, 255), 
-            1
-        )
+        # UI Overlay Text
+        cv2.putText(img, f"Emotion: {self.current_emotion}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(img, f"Gaze: ({gaze_vectors[0]:.2f}, {gaze_vectors[1]:.2f})", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         return frame.from_ndarray(img, format="bgr24")
 
@@ -231,7 +231,7 @@ tab_live, tab_video = st.tabs(["📡 Continuous Live Feed", "🎥 File Video Ana
 
 with tab_live:
     st.subheader("🔴 Real-Time WebRTC Eye Tracking & Segmentation")
-    st.write("Click **START** to open camera feed. State changes dynamically as sequence builds.")
+    st.write("Click **START** to open camera feed.")
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -240,10 +240,45 @@ with tab_live:
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=EyeTrackerVideoProcessor,
-            media_stream_constraints={"video": True, "audio": False},
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 640},
+                    "height": {"ideal": 480},
+                    "frameRate": {"ideal": 30, "max": 30}
+                },
+                "audio": False
+            },
             async_processing=True,
         )
 
 with tab_video:
     st.subheader("Upload Target Video File")
     uploaded = st.file_uploader("Choose a video file...", type=["mp4", "mov", "avi"])
+    if uploaded is not None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            tmp.write(uploaded.read())
+            tmp_path = tmp.name
+        
+        cap = cv2.VideoCapture(tmp_path)
+        col_display, col_metrics = st.columns(2)
+        with col_display: 
+            video_placeholder = st.empty()
+        with col_metrics:
+            emotion_metric = st.empty()
+            gaze_metric = st.empty()
+        
+        if st.button("Trigger Computation Node", type="primary"):
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret: break
+                
+                # Manual worker call for video files
+                proc = EyeTrackerVideoProcessor()
+                # Frame visual standard
+                frame_res = cv2.resize(frame, (640, 480))
+                video_placeholder.image(cv2.cvtColor(frame_res, cv2.COLOR_BGR2RGB), use_container_width=True)
+                time.sleep(0.01)
+                
+            cap.release()
+            try: os.unlink(tmp_path)
+            except Exception: pass
