@@ -81,136 +81,133 @@ def load_vision_models():
 seg_model, gaze_model, emotion_model, gaze_scaler = load_vision_models()
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
 
-# --- 🌐 RELIABLE STUN/TURN CONFIGURATION ---
+# --- 💻 CORE UNET PIPELINE PROCESSING FUNCTION ---
+def local_process_frame(frame, gaze_history_buffer):
+    frame = cv2.resize(frame, (640, 480))
+    h, w, _ = frame.shape
+
+    # Focus Eye Zone
+    crop_x1, crop_y1 = int(w * 0.15), int(h * 0.15)
+    crop_x2, crop_y2 = int(w * 0.85), int(h * 0.65)
+    eye_zone = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+
+    gaze_vectors = [0.5, 0.5]
+    pupil_size = 0.33
+    bbox_coords = None
+    eye_detected = False
+    detected_emotion = "Calculating..."
+
+    # 1. UNet Segmentation Mask & Contour Bounding Box
+    if seg_model is not None and eye_zone.size > 0:
+        try:
+            img_t = cv2.resize(eye_zone, (256, 256)).transpose((2, 0, 1)) / 255.0
+            img_t = torch.tensor([img_t], dtype=torch.float32).to(DEVICE)
+            
+            with torch.no_grad():
+                seg_out = seg_model(img_t)
+                if seg_out.shape[1] > 1:
+                    pred_mask = torch.argmax(seg_out, dim=1).squeeze().cpu().numpy()
+                else:
+                    pred_mask = (torch.sigmoid(seg_out).squeeze().cpu().numpy() > 0.5).astype(np.uint8)
+
+                zh, zw, _ = eye_zone.shape
+                mask_resized = cv2.resize(pred_mask.astype(np.uint8), (zw, zh), interpolation=cv2.INTER_NEAREST)
+
+                eye_binary = (mask_resized > 0).astype(np.uint8) * 255
+                contours, _ = cv2.findContours(eye_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                if contours:
+                    c = max(contours, key=cv2.contourArea)
+                    if cv2.contourArea(c) > 30:
+                        bx, by, bw, bh = cv2.boundingRect(c)
+                        bbox_coords = (crop_x1 + bx, crop_y1 + by, bw, bh)
+                        eye_detected = True
+
+                pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
+                pupil_size = float(np.clip(pupil_pixels / (zw * zh), 0.05, 0.8))
+
+                color_mask = np.zeros_like(eye_zone, dtype=np.uint8)
+                if seg_out.shape[1] > 1:
+                    color_mask[mask_resized == 1] = [0, 255, 0]    # Green (Sclera)
+                    color_mask[mask_resized == 2] = [255, 255, 0]  # Cyan (Iris)
+                    color_mask[mask_resized == 3] = [255, 0, 255]  # Magenta (Pupil)
+                else:
+                    color_mask[mask_resized == 1] = [180, 105, 255]
+
+                overlay = eye_zone.copy()
+                has_features = np.any(color_mask > 0, axis=-1)
+                overlay[has_features] = color_mask[has_features]
+                cv2.addWeighted(overlay, 0.65, eye_zone, 0.35, 0, frame[crop_y1:crop_y2, crop_x1:crop_x2])
+        except Exception:
+            pupil_size = 0.33
+
+    # 2. Draw Green Bounding Box
+    if bbox_coords is not None:
+        bx, by, bw, bh = bbox_coords
+        pad = 4
+        cv2.rectangle(
+            frame, 
+            (max(0, bx - pad), max(0, by - pad)), 
+            (min(w, bx + bw + pad), min(h, by + bh + pad)), 
+            (0, 255, 0), 
+            2
+        )
+
+    # 3. Gaze Estimation
+    if gaze_model is not None and eye_zone.size > 0:
+        try:
+            gaze_input = cv2.resize(eye_zone, (64, 64)).transpose((2, 0, 1)) / 255.0
+            gaze_input = torch.tensor([gaze_input], dtype=torch.float32).to(DEVICE)
+            with torch.no_grad():
+                gaze_out = gaze_model(gaze_input)
+                gaze_vectors = gaze_out.squeeze().cpu().tolist()
+        except Exception: pass
+
+    # 4. History Buffer & LSTM Emotion Prediction
+    current_features = [float(gaze_vectors[0]), float(gaze_vectors[1]), float(pupil_size)]
+    gaze_history_buffer.append(current_features)
+    if len(gaze_history_buffer) > 30:
+        gaze_history_buffer.pop(0)
+
+    if emotion_model is not None and len(gaze_history_buffer) == 30:
+        try:
+            raw_seq = np.array(gaze_history_buffer, dtype=np.float32)
+            scaled_seq = gaze_scaler.transform(raw_seq) if gaze_scaler is not None else raw_seq
+            seq_tensor = torch.tensor([scaled_seq], dtype=torch.float32).to(DEVICE)
+            
+            with torch.no_grad():
+                emotion_out = emotion_model(seq_tensor)
+                pred_idx = torch.argmax(emotion_out, dim=1).item()
+                detected_emotion = EMOTION_CLASSES[pred_idx]
+        except Exception:
+            detected_emotion = "Neutral"
+
+    # UI Visual Overlays
+    cv2.putText(frame, f"Emotion: {detected_emotion}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    cv2.putText(frame, f"Gaze: ({gaze_vectors[0]:.2f}, {gaze_vectors[1]:.2f})", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+    return frame, gaze_vectors, eye_detected, detected_emotion
+
+
+# --- 🎥 WEBRTC WORKER CLASS ---
 RTC_CONFIGURATION = RTCConfiguration(
     {
         "iceServers": [
             {"urls": ["stun:stun.l.google.com:19302"]},
             {"urls": ["stun:stun1.l.google.com:19302"]},
-            {"urls": ["stun:stun2.l.google.com:19302"]},
-            {"urls": ["stun:global.stun.twilio.com:3478"]},
-            {
-                "urls": ["turn:openrelay.metered.ca:80"],
-                "username": "openrelayproject",
-                "credential": "openrelayproject"
-            }
+            {"urls": ["stun:global.stun.twilio.com:3478"]}
         ]
     }
 )
 
-# --- 🎥 SEGMENTATION-FIRST VIDEO PROCESSOR ---
 class EyeTrackerVideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.gaze_history = []
-        self.sequence_length = 30
-        self.current_emotion = "Calculating..."
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.resize(img, (640, 480))
-        h, w, _ = img.shape
-
-        # Eye Level Focus Crop Region
-        crop_x1, crop_y1 = int(w * 0.15), int(h * 0.15)
-        crop_x2, crop_y2 = int(w * 0.85), int(h * 0.65)
-        eye_zone = img[crop_y1:crop_y2, crop_x1:crop_x2]
-
-        gaze_vectors = [0.5, 0.5]
-        pupil_size = 0.33
-        bbox_coords = None
-
-        # 1. 👁️ INSTANT UNET SEGMENTATION & DYNAMIC BOX DETECTION
-        if seg_model is not None and eye_zone.size > 0:
-            try:
-                img_t = cv2.resize(eye_zone, (256, 256)).transpose((2, 0, 1)) / 255.0
-                img_t = torch.tensor([img_t], dtype=torch.float32).to(DEVICE)
-                
-                with torch.no_grad():
-                    seg_out = seg_model(img_t)
-                    if seg_out.shape[1] > 1:
-                        pred_mask = torch.argmax(seg_out, dim=1).squeeze().cpu().numpy()
-                    else:
-                        pred_mask = (torch.sigmoid(seg_out).squeeze().cpu().numpy() > 0.5).astype(np.uint8)
-
-                    zh, zw, _ = eye_zone.shape
-                    mask_resized = cv2.resize(pred_mask.astype(np.uint8), (zw, zh), interpolation=cv2.INTER_NEAREST)
-
-                    # Binary Mask for Eye Components
-                    eye_binary = (mask_resized > 0).astype(np.uint8) * 255
-                    contours, _ = cv2.findContours(eye_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    
-                    # 🔥 SEGMENTATION RECOGNIZED -> INSTANT BOUNDING BOX DRAW
-                    if contours:
-                        c = max(contours, key=cv2.contourArea)
-                        if cv2.contourArea(c) > 30: # Sensitive Eye Detection threshold
-                            bx, by, bw, bh = cv2.boundingRect(c)
-                            bbox_coords = (crop_x1 + bx, crop_y1 + by, bw, bh)
-
-                    pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
-                    pupil_size = float(np.clip(pupil_pixels / (zw * zh), 0.05, 0.8))
-
-                    # 4-Class Color Overlay (Green / Cyan / Magenta)
-                    color_mask = np.zeros_like(eye_zone, dtype=np.uint8)
-                    if seg_out.shape[1] > 1:
-                        color_mask[mask_resized == 1] = [0, 255, 0]    # Sclera (Green)
-                        color_mask[mask_resized == 2] = [255, 255, 0]  # Iris (Cyan)
-                        color_mask[mask_resized == 3] = [255, 0, 255]  # Pupil (Magenta)
-                    else:
-                        color_mask[mask_resized == 1] = [180, 105, 255]
-
-                    overlay = eye_zone.copy()
-                    has_features = np.any(color_mask > 0, axis=-1)
-                    overlay[has_features] = color_mask[has_features]
-                    cv2.addWeighted(overlay, 0.65, eye_zone, 0.35, 0, img[crop_y1:crop_y2, crop_x1:crop_x2])
-            except Exception:
-                pupil_size = 0.33
-
-        # 2. 🟢 DRAW TIGHT GREEN BOX INSTANTLY AROUND SEGMENTED EYE
-        if bbox_coords is not None:
-            bx, by, bw, bh = bbox_coords
-            pad = 4
-            cv2.rectangle(
-                img, 
-                (max(0, bx - pad), max(0, by - pad)), 
-                (min(w, bx + bw + pad), min(h, by + bh + pad)), 
-                (0, 255, 0), 
-                2
-            )
-
-        # 3. GAZE ESTIMATION PIPELINE
-        if gaze_model is not None and eye_zone.size > 0:
-            try:
-                gaze_input = cv2.resize(eye_zone, (64, 64)).transpose((2, 0, 1)) / 255.0
-                gaze_input = torch.tensor([gaze_input], dtype=torch.float32).to(DEVICE)
-                with torch.no_grad():
-                    gaze_out = gaze_model(gaze_input)
-                    gaze_vectors = gaze_out.squeeze().cpu().tolist()
-            except Exception: pass
-
-        # 4. WORKER BUFFER & DYNAMIC EMOTION PREDICTION
-        current_features = [float(gaze_vectors[0]), float(gaze_vectors[1]), float(pupil_size)]
-        self.gaze_history.append(current_features)
-        if len(self.gaze_history) > self.sequence_length:
-            self.gaze_history.pop(0)
-
-        if emotion_model is not None and len(self.gaze_history) == self.sequence_length:
-            try:
-                raw_seq = np.array(self.gaze_history, dtype=np.float32)
-                scaled_seq = gaze_scaler.transform(raw_seq) if gaze_scaler is not None else raw_seq
-                seq_tensor = torch.tensor([scaled_seq], dtype=torch.float32).to(DEVICE)
-                
-                with torch.no_grad():
-                    emotion_out = emotion_model(seq_tensor)
-                    pred_idx = torch.argmax(emotion_out, dim=1).item()
-                    self.current_emotion = EMOTION_CLASSES[pred_idx]
-            except Exception:
-                self.current_emotion = "Neutral"
-
-        # On-Screen Overlay Text
-        cv2.putText(img, f"Emotion: {self.current_emotion}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(img, f"Gaze: ({gaze_vectors[0]:.2f}, {gaze_vectors[1]:.2f})", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-        return frame.from_ndarray(img, format="bgr24")
+        processed_frame, _, _, _ = local_process_frame(img, self.gaze_history)
+        return frame.from_ndarray(processed_frame, format="bgr24")
 
 
 # --- 🖥️ STREAMLIT UI LAYOUT ---
@@ -240,18 +237,12 @@ with tab_live:
         webrtc_streamer(
             key="eye-tracker-live-stream",
             mode=WebRtcMode.SENDRECV,
-            rtc_configuration={
-                "iceServers": [
-                    {"urls": ["stun:stun.l.google.com:19302"]},
-                    {"urls": ["stun:stun1.l.google.com:19302"]},
-                    {"urls": ["stun:stun2.l.google.com:19302"]},
-                    {"urls": ["stun:global.stun.twilio.com:3478"]},
-                ]
-            },
+            rtc_configuration=RTC_CONFIGURATION,
             video_processor_factory=EyeTrackerVideoProcessor,
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True,
         )
+
 with tab_video:
     st.subheader("Upload Target Video File")
     uploaded = st.file_uploader("Choose a video file...", type=["mp4", "mov", "avi"])
@@ -261,7 +252,7 @@ with tab_video:
             tmp_path = tmp.name
         
         cap = cv2.VideoCapture(tmp_path)
-        col_display, col_metrics = st.columns(2)
+        col_display, col_metrics = st.columns([2, 1])
         with col_display: 
             video_placeholder = st.empty()
         with col_metrics:
@@ -269,12 +260,19 @@ with tab_video:
             gaze_metric = st.empty()
         
         if st.button("Trigger Computation Node", type="primary"):
+            video_history_buffer = []
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
                 
-                frame_res = cv2.resize(frame, (640, 480))
-                video_placeholder.image(cv2.cvtColor(frame_res, cv2.COLOR_BGR2RGB), use_container_width=True)
+                # 🎯 PROCESS VIDEO FRAME WITH ALL UNET & GAZE OVERLAYS
+                processed_frame, gaze, detected, emotion = local_process_frame(frame, video_history_buffer)
+                
+                emotion_metric.metric(label="🧠 Predicted Emotion", value=str(emotion))
+                gaze_metric.code(f"Gaze (X,Y):\n({gaze[0]:.2f}, {gaze[1]:.2f})")
+                
+                # Display processed frame with segmentation mask and green bounding box
+                video_placeholder.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
                 time.sleep(0.01)
                 
             cap.release()
