@@ -7,7 +7,6 @@ import time
 import torch
 import sys
 import logging
-import asyncio
 import joblib
 import gdown
 from pathlib import Path
@@ -90,9 +89,20 @@ def local_process_frame(frame, is_snapshot=False):
     detected_emotion = "Neutral"
     
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-    eyes = eye_cascade.detectMultiScale(gray, 1.3, 5)
     
+    # 🔒 Safe Cascade Loading (Prevents AttributeError: 'cv2' has no attribute 'CascadeClassifier')
+    eye_cascade = None
+    if hasattr(cv2, 'CascadeClassifier'):
+        try:
+            cascade_path = cv2.data.haarcascades + 'haarcascade_eye.xml'
+            eye_cascade = cv2.CascadeClassifier(cascade_path)
+        except Exception:
+            eye_cascade = None
+
+    eyes = []
+    if eye_cascade is not None and not eye_cascade.empty():
+        eyes = eye_cascade.detectMultiScale(gray, 1.3, 5)
+
     if len(eyes) == 0:
         h, w, _ = frame.shape
         eyes = [[int(w*0.3), int(h*0.3), int(w*0.3), int(w*0.3)]]
@@ -102,7 +112,7 @@ def local_process_frame(frame, is_snapshot=False):
     for (ex, ey, ew, eh) in eyes:
         eye_crop = frame[ey:ey+eh, ex:ex+ew]
         
-        # 1. Segmentation (Pupil Ratio Calculation)
+        # 1. UNet Eye Segmentation (Pupil Ratio & Mask Calculation)
         if seg_model is not None:
             try:
                 img_t = cv2.resize(eye_crop, (256, 256)).transpose((2, 0, 1)) / 255.0
@@ -124,7 +134,7 @@ def local_process_frame(frame, is_snapshot=False):
             except Exception: 
                 pupil_size = 0.33
         
-        # 2. Gaze Estimation
+        # 2. Gaze Estimation Model
         if gaze_model is not None:
             try:
                 gaze_input = cv2.resize(eye_crop, (64, 64)).transpose((2, 0, 1)) / 255.0
@@ -137,10 +147,10 @@ def local_process_frame(frame, is_snapshot=False):
         cv2.rectangle(frame, (ex, ey), (ex+ew, ey+eh), (0, 255, 0), 2)
         break
 
-    # Combine 3 features [gaze_x, gaze_y, pupil_size]
+    # Feature Assembly [gaze_x, gaze_y, pupil_size]
     current_features = [float(gaze_vectors[0]), float(gaze_vectors[1]), float(pupil_size)]
     
-    # Snapshot handling: single photo click par Sequence of 30 frames simulate karta hai
+    # Snapshot mode handling for single photos (pads sequence length to 30)
     if is_snapshot:
         GAZE_HISTORY = [current_features] * SEQUENCE_LENGTH
     else:
@@ -148,7 +158,7 @@ def local_process_frame(frame, is_snapshot=False):
         if len(GAZE_HISTORY) > SEQUENCE_LENGTH: 
             GAZE_HISTORY.pop(0)
     
-    # 3. Emotion Inference using Scaler & LSTM
+    # 3. Emotion LSTM Inference
     if emotion_model is not None and len(GAZE_HISTORY) == SEQUENCE_LENGTH:
         try:
             raw_seq = np.array(GAZE_HISTORY, dtype=np.float32)
@@ -170,6 +180,7 @@ def local_process_frame(frame, is_snapshot=False):
     return frame, current_features, eye_detected, detected_emotion
 
 
+# --- 🖥️ STREAMLIT UI LAYOUT ---
 st.set_page_config(page_title="Vision AI Production Node", layout="wide")
 st.title("👁️ Enterprise Vision & Emotion Monitor (Cloud Live)")
 
@@ -202,7 +213,6 @@ with tab_video:
             try: os.unlink(tmp_path)
             except Exception: pass
 
-# --- 📸 MODE 2: WEBCAM LIVE TAB ---
 with tab_live:
     st.subheader("👁️ Live Eye Tracking & Emotion AI Pipeline")
     st.write("Take a snapshot or upload a video clip to run the 3-stage UNet + LSTM inference pipeline.")
@@ -218,7 +228,6 @@ with tab_live:
 
             with st.spinner("Running UNet Segmentation & LSTM Inference..."):
                 try:
-                    # Pass is_snapshot=True for instant single-image emotion calculation
                     processed_img, gaze_feat, detected, emotion = local_process_frame(cv_img, is_snapshot=True)
                     
                     col1, col2 = st.columns(2)
