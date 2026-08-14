@@ -10,6 +10,10 @@ import logging
 import joblib
 import gdown
 from pathlib import Path
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration, WebRtcMode
+
+# Streamlit-WebRTC Logs Supress
+logging.getLogger("streamlit_webrtc").setLevel(logging.CRITICAL)
 
 # --- 📁 PATHS MANAGEMENT & MODEL IMPORTS ---
 ROOT_DIR = Path(__file__).parent.parent
@@ -81,7 +85,7 @@ SEQUENCE_LENGTH = 30
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
 
 # --- 💻 CORE ANALYTICS ENGINE ---
-def local_process_frame(frame, is_snapshot=False):
+def local_process_frame(frame):
     global GAZE_HISTORY
     eye_detected = False
     gaze_vectors = [0.5, 0.5]
@@ -89,8 +93,12 @@ def local_process_frame(frame, is_snapshot=False):
     detected_emotion = "Neutral"
     
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    h, w, _ = frame.shape
     
-    # 🔒 Safe Cascade Loading (Prevents AttributeError: 'cv2' has no attribute 'CascadeClassifier')
+    # Default Center Crop (Smart fallback focusing on face/eye zone)
+    ex, ey, ew, eh = int(w * 0.3), int(h * 0.25), int(w * 0.4), int(h * 0.25)
+
+    # 🔒 Safe Cascade Classifier Loading
     eye_cascade = None
     if hasattr(cv2, 'CascadeClassifier'):
         try:
@@ -99,75 +107,68 @@ def local_process_frame(frame, is_snapshot=False):
         except Exception:
             eye_cascade = None
 
-    eyes = []
     if eye_cascade is not None and not eye_cascade.empty():
-        eyes = eye_cascade.detectMultiScale(gray, 1.3, 5)
-
-    if len(eyes) == 0:
-        h, w, _ = frame.shape
-        eyes = [[int(w*0.3), int(h*0.3), int(w*0.3), int(w*0.3)]]
-    else: 
-        eye_detected = True
-
-    for (ex, ey, ew, eh) in eyes:
-        eye_crop = frame[ey:ey+eh, ex:ex+ew]
+        detected_eyes = eye_cascade.detectMultiScale(gray, 1.3, 5)
+        valid_eyes = []
+        for (x, y, bw, bh) in detected_eyes:
+            # Filter background detections
+            if y < h * 0.6 and x > w * 0.1 and x < w * 0.8:
+                valid_eyes.append((x, y, bw, bh))
         
-        # 1. UNet Eye Segmentation (Pupil Ratio & Mask Calculation)
-        if seg_model is not None:
-            try:
-                img_t = cv2.resize(eye_crop, (256, 256)).transpose((2, 0, 1)) / 255.0
-                img_t = torch.tensor([img_t], dtype=torch.float32).to(DEVICE)
-                with torch.no_grad():
-                    seg_out = seg_model(img_t)
-                    pred_mask = torch.sigmoid(seg_out).squeeze().cpu().numpy()
-                    
-                    pupil_pixels = np.sum(pred_mask > 0.5)
-                    pupil_size = float(np.clip(pupil_pixels / (256 * 256), 0.1, 0.8))
-                    
-                    iris_mask = cv2.resize((pred_mask > 0.5).astype(np.uint8) * 255, (ew, eh))
-                    pupil_mask = cv2.resize((pred_mask > 0.5).astype(np.uint8) * 255, (ew, eh))
+        if len(valid_eyes) > 0:
+            ex, ey, ew, eh = valid_eyes[0]
+            eye_detected = True
+
+    eye_crop = frame[ey:ey+eh, ex:ex+ew]
+    
+    # 1. UNet Eye Segmentation
+    if seg_model is not None and eye_crop.size > 0:
+        try:
+            img_t = cv2.resize(eye_crop, (256, 256)).transpose((2, 0, 1)) / 255.0
+            img_t = torch.tensor([img_t], dtype=torch.float32).to(DEVICE)
+            with torch.no_grad():
+                seg_out = seg_model(img_t)
+                pred_mask = torch.sigmoid(seg_out).squeeze().cpu().numpy()
                 
-                overlay = frame[ey:ey+eh, ex:ex+ew].copy()
-                overlay[iris_mask > 0] = (255, 255, 0)
-                overlay[pupil_mask > 0] = (180, 105, 255)
-                cv2.addWeighted(overlay, 0.6, frame[ey:ey+eh, ex:ex+ew], 0.4, 0, frame[ey:ey+eh, ex:ex+ew])
-            except Exception: 
-                pupil_size = 0.33
-        
-        # 2. Gaze Estimation Model
-        if gaze_model is not None:
-            try:
-                gaze_input = cv2.resize(eye_crop, (64, 64)).transpose((2, 0, 1)) / 255.0
-                gaze_input = torch.tensor([gaze_input], dtype=torch.float32).to(DEVICE)
-                with torch.no_grad():
-                    gaze_out = gaze_model(gaze_input)
-                    gaze_vectors = gaze_out.squeeze().cpu().tolist()
-            except Exception: pass
+                pupil_pixels = np.sum(pred_mask > 0.5)
+                pupil_size = float(np.clip(pupil_pixels / (256 * 256), 0.1, 0.8))
+                
+                iris_mask = cv2.resize((pred_mask > 0.5).astype(np.uint8) * 255, (ew, eh))
+                pupil_mask = cv2.resize((pred_mask > 0.5).astype(np.uint8) * 255, (ew, eh))
             
-        cv2.rectangle(frame, (ex, ey), (ex+ew, ey+eh), (0, 255, 0), 2)
-        break
+            overlay = frame[ey:ey+eh, ex:ex+ew].copy()
+            overlay[iris_mask > 0] = (255, 255, 0)
+            overlay[pupil_mask > 0] = (180, 105, 255)
+            cv2.addWeighted(overlay, 0.6, frame[ey:ey+eh, ex:ex+ew], 0.4, 0, frame[ey:ey+eh, ex:ex+ew])
+            eye_detected = True
+        except Exception: 
+            pupil_size = 0.33
+    
+    # 2. Gaze Estimation
+    if gaze_model is not None and eye_crop.size > 0:
+        try:
+            gaze_input = cv2.resize(eye_crop, (64, 64)).transpose((2, 0, 1)) / 255.0
+            gaze_input = torch.tensor([gaze_input], dtype=torch.float32).to(DEVICE)
+            with torch.no_grad():
+                gaze_out = gaze_model(gaze_input)
+                gaze_vectors = gaze_out.squeeze().cpu().tolist()
+        except Exception: pass
 
-    # Feature Assembly [gaze_x, gaze_y, pupil_size]
+    # Draw Eye Box
+    cv2.rectangle(frame, (ex, ey), (ex+ew, ey+eh), (0, 255, 0), 2)
+
+    # Feature Matrix
     current_features = [float(gaze_vectors[0]), float(gaze_vectors[1]), float(pupil_size)]
     
-    # Snapshot mode handling for single photos (pads sequence length to 30)
-    if is_snapshot:
-        GAZE_HISTORY = [current_features] * SEQUENCE_LENGTH
-    else:
-        GAZE_HISTORY.append(current_features)
-        if len(GAZE_HISTORY) > SEQUENCE_LENGTH: 
-            GAZE_HISTORY.pop(0)
+    GAZE_HISTORY.append(current_features)
+    if len(GAZE_HISTORY) > SEQUENCE_LENGTH: 
+        GAZE_HISTORY.pop(0)
     
-    # 3. Emotion LSTM Inference
+    # 3. Emotion LSTM Inference (Runs continuously once 30 frames collect)
     if emotion_model is not None and len(GAZE_HISTORY) == SEQUENCE_LENGTH:
         try:
             raw_seq = np.array(GAZE_HISTORY, dtype=np.float32)
-            
-            if gaze_scaler is not None:
-                scaled_seq = gaze_scaler.transform(raw_seq)
-            else:
-                scaled_seq = raw_seq
-                
+            scaled_seq = gaze_scaler.transform(raw_seq) if gaze_scaler is not None else raw_seq
             seq_tensor = torch.tensor([scaled_seq], dtype=torch.float32).to(DEVICE)
             
             with torch.no_grad():
@@ -180,11 +181,59 @@ def local_process_frame(frame, is_snapshot=False):
     return frame, current_features, eye_detected, detected_emotion
 
 
+# --- 🎥 WEBRTC VIDEO TRANSFORMER WORKER ---
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+class EyeTrackerVideoTransformer(VideoTransformerBase):
+    def transform(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        
+        # Process live frame through AI pipeline
+        processed_frame, gaze, detected, emotion = local_process_frame(img)
+        
+        # Overlay Live Metrics directly onto video stream
+        cv2.putText(
+            processed_frame, 
+            f"State: {emotion}", 
+            (30, 50), 
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            1.0, 
+            (0, 255, 0), 
+            2
+        )
+        if gaze is not None:
+            cv2.putText(
+                processed_frame, 
+                f"Gaze (X,Y): ({gaze[0]:.2f}, {gaze[1]:.2f})", 
+                (30, 90), 
+                cv2.FONT_HERSHEY_SIMPLEX, 
+                0.6, 
+                (255, 255, 255), 
+                1
+            )
+            
+        return processed_frame
+
+
 # --- 🖥️ STREAMLIT UI LAYOUT ---
 st.set_page_config(page_title="Vision AI Production Node", layout="wide")
 st.title("👁️ Enterprise Vision & Emotion Monitor (Cloud Live)")
 
-tab_video, tab_live = st.tabs(["🎥 Network Video Analyzer", "📸 Live Webcam Node"])
+tab_live, tab_video = st.tabs(["📡 Continuous Live Feed", "🎥 File Video Analyzer"])
+
+with tab_live:
+    st.subheader("🔴 Live Stream Eye-Tracking & Emotion Recognition")
+    st.write("Click **START** below to launch your camera stream and run real-time inference.")
+
+    webrtc_streamer(
+        key="eye-tracker-live-stream",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration=RTC_CONFIGURATION,
+        video_transformer_factory=EyeTrackerVideoTransformer,
+        async_transform=True,
+    )
 
 with tab_video:
     st.subheader("Upload Target Video File")
@@ -200,11 +249,11 @@ with tab_video:
             emotion_metric = st.empty()
             gaze_metric = st.empty()
         
-        if st.button("Trigger Internal Computation Node", type="primary"):
+        if st.button("Trigger Computation Node", type="primary"):
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
-                processed_frame, gaze, detected, emotion = local_process_frame(frame, is_snapshot=False)
+                processed_frame, gaze, detected, emotion = local_process_frame(frame)
                 emotion_metric.metric(label="🧠 Predicted State", value=str(emotion))
                 gaze_metric.code(f"Gaze (X,Y,Pupil):\n{gaze}")
                 video_placeholder.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
@@ -212,69 +261,3 @@ with tab_video:
             cap.release()
             try: os.unlink(tmp_path)
             except Exception: pass
-
-with tab_live:
-    st.subheader("👁️ Live Eye Tracking & Emotion AI Pipeline")
-    st.write("Take a snapshot or upload a video clip to run the 3-stage UNet + LSTM inference pipeline.")
-
-    input_mode = st.radio("Select Input Mode:", ["📸 Live Camera Capture", "🎥 Upload Test Video"], horizontal=True)
-
-    if input_mode == "📸 Live Camera Capture":
-        img_file_buffer = st.camera_input("Take a photo to process real-time gaze and emotion")
-
-        if img_file_buffer is not None:
-            bytes_data = img_file_buffer.getvalue()
-            cv_img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-
-            with st.spinner("Running UNet Segmentation & LSTM Inference..."):
-                try:
-                    processed_img, gaze_feat, detected, emotion = local_process_frame(cv_img, is_snapshot=True)
-                    
-                    col1, col2 = st.columns(2)
-
-                    with col1:
-                        st.image(cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB), caption="Processed Visual Output", use_container_width=True)
-
-                    with col2:
-                        st.markdown("### 📊 Pipeline Diagnostics")
-                        st.metric(label="Predicted Emotion State", value=f"🧠 {emotion}")
-                        
-                        if detected and gaze_feat is not None:
-                            st.success("✅ Eye Region Detected")
-                            st.markdown(f"**Gaze Coordinates ($X, Y$):** `({gaze_feat[0]:.2f}, {gaze_feat[1]:.2f})`")
-                            st.markdown(f"**Pupil Ratio:** `{gaze_feat[2]:.3f}`")
-                        else:
-                            st.warning("⚠️ Face/Eye Region Not Clear")
-
-                except Exception as e:
-                    st.error(f"Inference Error: {str(e)}")
-
-    else:
-        uploaded_video = st.file_uploader("Upload MP4/AVI Video", type=["mp4", "avi", "mov"])
-
-        if uploaded_video is not None:
-            tfile = tempfile.NamedTemporaryFile(delete=False)
-            tfile.write(uploaded_video.read())
-
-            cap = cv2.VideoCapture(tfile.name)
-            st_frame = st.empty()
-            metrics_container = st.empty()
-
-            st.info("Processing video stream frame-by-frame...")
-            
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret: break
-                
-                processed_img, gaze_feat, detected, emotion = local_process_frame(frame, is_snapshot=False)
-
-                cv2.putText(processed_img, f"Emotion: {emotion}", (20, 40), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-                
-                st_frame.image(cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB), use_container_width=True)
-                
-                if gaze_feat is not None:
-                    metrics_container.caption(f"Gaze ($X,Y$): ({gaze_feat[0]:.2f}, {gaze_feat[1]:.2f}) | Pupil: {gaze_feat[2]:.2f} | Emotion: {emotion}")
-
-            cap.release()
-            st.success("Video Stream Processing Complete!")
