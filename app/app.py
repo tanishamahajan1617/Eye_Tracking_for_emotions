@@ -8,11 +8,12 @@ import time
 import gdown
 import sys
 from pathlib import Path
+import mediapipe as mp  # Dynamic Eye Detection
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Eye Tracking & Emotion AI Demo", layout="wide")
 st.title("👁️ Eye Tracking & Emotion Recognition System")
-st.caption("Real-time Eye Segmentation (UNet), Gaze Estimation, and Sequence-based Emotion Classification (LSTM)")
+st.caption("Real-time Eye Segmentation Overlay (UNet) & Interval-based Emotion Classification")
 
 # --- 2. PATHS & AUTO-DOWNLOADER ---
 CURRENT_DIR = Path(__file__).parent
@@ -48,6 +49,16 @@ with st.spinner("Downloading/Loading Models from Drive..."):
     if not SCALER_FILE.exists():
         download_file_from_google_drive(SCALER_FILE_ID, SCALER_FILE)
 
+# MediaPipe Face Mesh Setup
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
 # --- 3. MODEL LOADERS ---
 @st.cache_resource
 def load_all_assets():
@@ -56,28 +67,23 @@ def load_all_assets():
         from Models.gaze_model import GazeModel
         from Models.emotion_model import EmotionLSTM
         
-        # Load UNet
         seg_model = UNet().to(DEVICE)
         seg_model.load_state_dict(torch.load(WEIGHTS_SEG, map_location=DEVICE))
         seg_model.eval()
 
-        # Check expected channels of UNet first layer
         try:
             expected_in_channels = seg_model.inc.double_conv[0].in_channels
         except Exception:
-            expected_in_channels = 3 # Default fallback
+            expected_in_channels = 3 
 
-        # Load Gaze Model
         gaze_model = GazeModel().to(DEVICE)
         gaze_model.load_state_dict(torch.load(WEIGHTS_GAZE, map_location=DEVICE))
         gaze_model.eval()
 
-        # Load Emotion LSTM
         emotion_model = EmotionLSTM(input_size=3, num_classes=4).to(DEVICE)
         emotion_model.load_state_dict(torch.load(WEIGHTS_EMOTION, map_location=DEVICE), strict=False)
         emotion_model.eval()
 
-        # Load Scaler
         scaler = joblib.load(SCALER_FILE)
 
         return seg_model, gaze_model, emotion_model, scaler, expected_in_channels, True
@@ -87,29 +93,55 @@ def load_all_assets():
 
 seg_model, gaze_model, emotion_model, gaze_scaler, expected_in_channels, loaded_ok = load_all_assets()
 
+# --- DYNAMIC EYE BBOX CROPPER ---
+def extract_dynamic_eye_region(frame):
+    h, w, _ = frame.shape
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb_frame)
+
+    if results.multi_face_landmarks:
+        landmarks = results.multi_face_landmarks[0].landmark
+        eye_pts_idx = [33, 133, 362, 263, 70, 300, 27, 257, 287] 
+        x_coords = [int(landmarks[idx].x * w) for idx in eye_pts_idx]
+        y_coords = [int(landmarks[idx].y * h) for idx in eye_pts_idx]
+
+        padding_x = int(w * 0.03)
+        padding_y = int(h * 0.02)
+
+        min_x = max(0, min(x_coords) - padding_x)
+        max_x = min(w, max(x_coords) + padding_x)
+        min_y = max(0, min(y_coords) - padding_y)
+        max_y = min(h, max(y_coords) + padding_y)
+
+        ex, ey = min_x, min_y
+        ew, eh = max_x - min_x, max_y - min_y
+        return ex, ey, ew, eh
+    else:
+        return int(w * 0.10), int(h * 0.45), int(w * 0.80), int(h * 0.35)
+
 # --- 4. FRAME PROCESSING FUNCTION ---
-def process_frame(frame, sequence_buffer):
+def process_frame(frame, sequence_buffer, frame_count, last_emotion):
     h, w, _ = frame.shape
     
-    ex, ey = int(w * 0.15), int(h * 0.35)
-    ew, eh = int(w * 0.70), int(h * 0.40)
+    # Dynamic crop using MediaPipe
+    ex, ey, ew, eh = extract_dynamic_eye_region(frame)
     eye_crop = frame[ey:ey+eh, ex:ex+ew]
 
     gaze_x, gaze_y = 0.5, 0.5
     pupil_ratio = 0.33
     
     if eye_crop is not None and eye_crop.shape[0] > 10 and eye_crop.shape[1] > 10:
-        # --- A. UNET PREPROCESSING WITH AUTO-CHANNEL MATCH ---
+        # --- A. UNET EYE SEGMENTATION HIGHLIGHTING (EVERY FRAME) ---
         resized_crop = cv2.resize(eye_crop, (256, 256))
         
         if expected_in_channels == 1:
             gray_crop = cv2.cvtColor(resized_crop, cv2.COLOR_BGR2GRAY)
-            img_seg_np = np.expand_dims(gray_crop, axis=0).astype(np.float32) / 255.0 # Shape: (1, 256, 256)
+            img_seg_np = np.expand_dims(gray_crop, axis=0).astype(np.float32) / 255.0
         else:
             rgb_crop = cv2.cvtColor(resized_crop, cv2.COLOR_BGR2RGB)
-            img_seg_np = rgb_crop.transpose((2, 0, 1)).astype(np.float32) / 255.0 # Shape: (3, 256, 256)
+            img_seg_np = rgb_crop.transpose((2, 0, 1)).astype(np.float32) / 255.0
             
-        img_seg_t = torch.from_numpy(img_seg_np).unsqueeze(0).to(DEVICE) # Shape: (1, C, 256, 256)
+        img_seg_t = torch.from_numpy(img_seg_np).unsqueeze(0).to(DEVICE)
         
         with torch.no_grad():
             seg_out = seg_model(img_seg_t)
@@ -119,20 +151,25 @@ def process_frame(frame, sequence_buffer):
             else:
                 pred_mask = (torch.sigmoid(seg_out).squeeze().cpu().numpy() > 0.25).astype(np.uint8)
 
+            # Resize mask back to original cropped eye dimensions
             mask_resized = cv2.resize(pred_mask.astype(np.uint8), (ew, eh), interpolation=cv2.INTER_NEAREST)
 
+            # Create colorful overlay for Sclera, Iris, and Pupil
             color_mask = np.zeros_like(eye_crop, dtype=np.uint8)
             if seg_out.shape[1] > 1:
-                color_mask[mask_resized == 1] = [0, 255, 0]    # 🟢 Sclera
-                color_mask[mask_resized == 2] = [255, 255, 0]  # 🩵 Iris
-                color_mask[mask_resized == 3] = [255, 0, 255]  # 🩷 Pupil
+                color_mask[mask_resized == 1] = [0, 255, 0]    # 🟢 Sclera: Green
+                color_mask[mask_resized == 2] = [255, 255, 0]  # 🩵 Iris: Cyan
+                color_mask[mask_resized == 3] = [255, 0, 255]  # 🩷 Pupil: Magenta
             else:
                 color_mask[mask_resized == 1] = [0, 255, 0]
 
+            # Alpha blend directly onto eyes area
             overlay = eye_crop.copy()
             has_mask = np.any(color_mask > 0, axis=-1)
             overlay[has_mask] = color_mask[has_mask]
-            cv2.addWeighted(overlay, 0.7, eye_crop, 0.3, 0, frame[ey:ey+eh, ex:ex+ew])
+            
+            # Highlight parts inside video frame
+            cv2.addWeighted(overlay, 0.6, eye_crop, 0.4, 0, frame[ey:ey+eh, ex:ex+ew])
 
             pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
             pupil_ratio = float(np.clip(pupil_pixels / (ew * eh), 0.05, 0.8))
@@ -149,17 +186,19 @@ def process_frame(frame, sequence_buffer):
             if isinstance(gaze_coords, list) and len(gaze_coords) >= 2:
                 gaze_x, gaze_y = float(gaze_coords[0]), float(gaze_coords[1])
 
+        # Draw green bounding box around eyes
         cv2.rectangle(frame, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
-        cv2.putText(frame, "Eye Segmented Zone", (ex, ey - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        cv2.putText(frame, "Segmented Eye Zone", (ex, ey - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-    # --- C. EMOTION PREDICTION ---
+    # Sequence buffering
     current_step = [gaze_x, gaze_y, pupil_ratio]
     sequence_buffer.append(current_step)
     if len(sequence_buffer) > 30:
         sequence_buffer.pop(0)
 
-    predicted_emotion = "Gathering Frames..."
-    if len(sequence_buffer) == 30:
+    # --- C. EMOTION PREDICTION (EVERY 5 FRAMES) ---
+    predicted_emotion = last_emotion
+    if len(sequence_buffer) == 30 and (frame_count % 5 == 0):
         raw_seq = np.array(sequence_buffer, dtype=np.float32)
         scaled_seq = gaze_scaler.transform(raw_seq) if gaze_scaler is not None else raw_seq
         seq_tensor = torch.tensor([scaled_seq], dtype=torch.float32).to(DEVICE)
@@ -182,14 +221,14 @@ if loaded_ok:
         gaze_metric = st.empty()
         
         st.markdown("---")
-        st.markdown("### 🎨 UNet Color Mask Key")
-        st.markdown("- 🟢 **Sclera:** Green")
-        st.markdown("- 🩵 **Iris:** Cyan")
-        st.markdown("- 🩷 **Pupil:** Magenta")
+        st.markdown("### 🎨 UNet Color Segmentation Key")
+        st.markdown("- 🟢 **Sclera:** Green Highlight")
+        st.markdown("- 🩵 **Iris:** Cyan Highlight")
+        st.markdown("- 🩷 **Pupil:** Magenta Highlight")
 
     with col_left:
         st.subheader("🎥 Demonstration Feed")
-        uploaded_video = st.file_uploader("Upload Demo Video File (.mp4, .avi, .mov)", type=["mp4", "avi", "mov"])
+        uploaded_video = st.file_uploader("Upload Video File (.mp4, .avi, .mov)", type=["mp4", "avi", "mov"])
         video_placeholder = st.empty()
 
     if uploaded_video is not None:
@@ -199,6 +238,8 @@ if loaded_ok:
 
         cap = cv2.VideoCapture(str(temp_path))
         sequence_buffer = []
+        frame_count = 0
+        current_emotion = "Gathering Frames..."
 
         if st.button("▶️ Run Model Pipeline Demo", type="primary"):
             while cap.isOpened():
@@ -206,11 +247,19 @@ if loaded_ok:
                 if not ret:
                     break
 
+                frame_count += 1
                 frame = cv2.resize(frame, (640, 480))
-                processed_frame, gx, gy, emotion = process_frame(frame, sequence_buffer)
+                
+                # Frame processing
+                processed_frame, gx, gy, current_emotion = process_frame(
+                    frame, sequence_buffer, frame_count, current_emotion
+                )
 
+                # Show real-time video feed
                 video_placeholder.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
-                emotion_metric.metric(label="🧠 Predicted Emotion", value=emotion)
+                
+                # Show updated emotion every 5 frames
+                emotion_metric.metric(label="🧠 Predicted Emotion (Updates Every 5 Frames)", value=current_emotion)
                 gaze_metric.code(f"Gaze Vector (X, Y):\n({gx:.2f}, {gy:.2f})")
 
                 time.sleep(0.01)
