@@ -233,19 +233,25 @@ tab_live, tab_video = st.tabs(["📡 Continuous Live Feed", "🎥 File Video Ana
 
 with tab_live:
     st.subheader("🔴 Real-Time WebRTC Eye Tracking & Segmentation")
-    st.write("Click **START** to open camera feed. Green box triggers instantly on eye segmentation mask.")
+    st.write("Click **START** to open camera feed.")
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         webrtc_streamer(
             key="eye-tracker-live-stream",
             mode=WebRtcMode.SENDRECV,
-            rtc_configuration=RTC_CONFIGURATION,
+            rtc_configuration={
+                "iceServers": [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    {"urls": ["stun:stun1.l.google.com:19302"]},
+                    {"urls": ["stun:stun2.l.google.com:19302"]},
+                    {"urls": ["stun:global.stun.twilio.com:3478"]},
+                ]
+            },
             video_processor_factory=EyeTrackerVideoProcessor,
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True,
         )
-
 with tab_video:
     st.subheader("Upload Target Video File")
     uploaded = st.file_uploader("Choose a video file...", type=["mp4", "mov", "avi"])
