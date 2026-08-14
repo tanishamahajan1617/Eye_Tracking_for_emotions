@@ -7,26 +7,26 @@ import joblib
 import time
 import gdown
 import sys
+import os
 from pathlib import Path
 
 # --- 1. SAFE MEDIAPIPE FACE MESH IMPORT ---
 import mediapipe as mp
 
-# Dynamic loader to prevent VS Code / Pylance reportMissingImports warning
-face_mesh_module = getattr(mp.solutions, 'face_mesh', None)
-
-if face_mesh_module is None:
-    # Direct fallback if solutions dynamically fails to attach
+try:
+    mp_face_mesh = mp.solutions.face_mesh
+except AttributeError:
     import importlib
-    face_mesh_module = importlib.import_module('mediapipe.python.solutions.face_mesh')
+    mp_face_mesh = importlib.import_module('mediapipe.python.solutions.face_mesh')
 
-face_mesh = face_mesh_module.FaceMesh(
+face_mesh = mp_face_mesh.FaceMesh(
     static_image_mode=False,
     max_num_faces=1,
     refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+    min_detection_confidence=0.3,
+    min_tracking_confidence=0.3
 )
+
 # --- 2. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Eye Tracking & Emotion AI", layout="wide")
 st.title("👁️ Dynamic Eye Tracking & Emotion Recognition")
@@ -47,7 +47,6 @@ SCALER_FILE = CURRENT_DIR / "gaze_scaler.pkl"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
 
-# BGR Colors for Segmentation Highlight
 COLOR_SCLERA = (0, 255, 0)     # 🟢 Green
 COLOR_IRIS = (255, 255, 0)     # 🩵 Cyan 
 COLOR_PUPIL = (255, 0, 255)    # 🩷 Magenta
@@ -105,7 +104,7 @@ def load_all_assets():
 
 seg_model, gaze_model, emotion_model, gaze_scaler, expected_in_channels, loaded_ok = load_all_assets()
 
-# --- 5. DYNAMIC MEDIAPIPE EYE BOUNDING BOX CROPPER ---
+# --- 5. ACCURATE MEDIAPIPE EYE BOUNDING BOX CROPPER ---
 def extract_dynamic_eye_region(frame):
     h, w, _ = frame.shape
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -116,13 +115,17 @@ def extract_dynamic_eye_region(frame):
         if results.multi_face_landmarks:
             landmarks = results.multi_face_landmarks[0].landmark
             
-            # Key eye landmark indices from MediaPipe FaceMesh
-            eye_pts_idx = [33, 133, 362, 263, 70, 300, 27, 257, 287] 
+            # Specific landmarks strictly around both eyes (Left & Right Eyes)
+            eye_pts_idx = [
+                33, 133, 160, 159, 158, 144, 145, 153,  # Left Eye
+                362, 263, 387, 386, 385, 373, 374, 380  # Right Eye
+            ]
+            
             x_coords = [int(landmarks[idx].x * w) for idx in eye_pts_idx]
             y_coords = [int(landmarks[idx].y * h) for idx in eye_pts_idx]
 
-            padding_x = int(w * 0.03)
-            padding_y = int(h * 0.02)
+            padding_x = int(w * 0.02)
+            padding_y = int(h * 0.015)
 
             min_x = max(0, min(x_coords) - padding_x)
             max_x = min(w, max(x_coords) + padding_x)
@@ -137,14 +140,13 @@ def extract_dynamic_eye_region(frame):
     except Exception:
         pass
 
-    # Mathematical fallback if face is momentarily obscured
-    return int(w * 0.10), int(h * 0.38), int(w * 0.80), int(h * 0.35)
+    # Tighter fallback tightly cropped to eye band only
+    return int(w * 0.15), int(h * 0.32), int(w * 0.70), int(h * 0.18)
 
 # --- 6. FRAME PROCESSING FUNCTION ---
 def process_frame(frame, sequence_buffer, frame_count, last_emotion):
     h, w, _ = frame.shape
     
-    # Exact Dynamic Crop using MediaPipe
     ex, ey, ew, eh = extract_dynamic_eye_region(frame)
     eye_crop = frame[ey:ey+eh, ex:ex+ew]
 
@@ -174,7 +176,6 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
 
             mask_resized = cv2.resize(pred_mask.astype(np.uint8), (ew, eh), interpolation=cv2.INTER_NEAREST)
 
-            # Color mask setup for eyes
             color_mask = np.zeros_like(eye_crop, dtype=np.uint8)
             if seg_out.shape[1] > 1:
                 color_mask[mask_resized == 1] = COLOR_SCLERA  # 🟢 Green
@@ -187,7 +188,6 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
             has_mask = np.any(color_mask > 0, axis=-1)
             overlay[has_mask] = color_mask[has_mask]
             
-            # Transparent Blend (60% Mask, 40% Original Crop)
             cv2.addWeighted(overlay, 0.6, eye_crop, 0.4, 0, frame[ey:ey+eh, ex:ex+ew])
 
             pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
@@ -226,7 +226,7 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
 
     return frame, gaze_x, gaze_y, predicted_emotion
 
-# --- 7. USER INTERFACE & REAL-TIME STREAMER ---
+# --- 7. USER INTERFACE & RENDERED VIDEO PLAYER ---
 if loaded_ok:
     col_left, col_right = st.columns([2, 1])
 
@@ -244,43 +244,61 @@ if loaded_ok:
     with col_left:
         st.subheader("🎥 Dynamic AI Video Feed")
         uploaded_video = st.file_uploader("Upload Input Video (.mp4, .avi, .mov)", type=["mp4", "avi", "mov"])
-        video_placeholder = st.empty()
 
     if uploaded_video is not None:
-        temp_path = Path("temp_demo_video.mp4")
-        with open(temp_path, "wb") as f:
+        temp_input = Path("temp_input_video.mp4")
+        temp_output = Path("temp_output_video.mp4")
+        
+        with open(temp_input, "wb") as f:
             f.write(uploaded_video.read())
 
-        cap = cv2.VideoCapture(str(temp_path))
-        sequence_buffer = []
-        frame_count = 0
-        current_emotion = "Gathering Frames..."
+        if st.button("▶️ Process & Render AI Video", type="primary"):
+            cap = cv2.VideoCapture(str(temp_input))
+            
+            fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        if st.button("▶️ Start Live AI Video Player", type="primary"):
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(str(temp_output), fourcc, fps, (width, height))
+
+            progress_bar = st.progress(0, text="🤖 Processing Frames with MediaPipe & UNet...")
+            
+            sequence_buffer = []
+            frame_count = 0
+            current_emotion = "Analyzing..."
+
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
                     break
 
                 frame_count += 1
-                frame = cv2.resize(frame, (640, 480))
                 
                 processed_frame, gx, gy, current_emotion = process_frame(
                     frame, sequence_buffer, frame_count, current_emotion
                 )
 
-                # Real-time Streamlit Image Stream
-                video_placeholder.image(
-                    cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), 
-                    channels="RGB",
-                    use_container_width=True
-                )
+                out.write(processed_frame)
                 
-                emotion_metric.metric(label="🧠 Emotion Prediction (LSTM)", value=current_emotion)
-                gaze_metric.code(f"Gaze Vector (X, Y):\n({gx:.2f}, {gy:.2f})")
-
-                time.sleep(0.01)
+                if total_frames > 0:
+                    progress_bar.progress(min(frame_count / total_frames, 1.0))
 
             cap.release()
-            if temp_path.exists():
-                temp_path.unlink()
+            out.release()
+            progress_bar.empty()
+
+            st.success("✅ AI Processing Complete!")
+            
+            # Display rendered processed video with full player controls
+            with open(temp_output, 'rb') as v_file:
+                video_bytes = v_file.read()
+                st.video(video_bytes)
+
+            emotion_metric.metric(label="🧠 Final Emotion Prediction", value=current_emotion)
+
+            if temp_input.exists():
+                temp_input.unlink()
+            if temp_output.exists():
+                temp_output.unlink()
