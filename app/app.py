@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit as st
 import cv2
 import numpy as np
 import torch
@@ -8,14 +9,25 @@ import time
 import gdown
 import sys
 from pathlib import Path
-import mediapipe as mp  # Dynamic Eye Detection
 
-# --- 1. PAGE CONFIGURATION ---
+# --- 1. SAFE MEDIAPIPE IMPORT ---
+import mediapipe as mp
+
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
+# --- 2. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Eye Tracking & Emotion AI Demo", layout="wide")
 st.title("👁️ Eye Tracking & Emotion Recognition System")
 st.caption("Real-time Eye Segmentation Overlay (UNet) & Interval-based Emotion Classification")
 
-# --- 2. PATHS & AUTO-DOWNLOADER ---
+# --- 3. PATHS & AUTO-DOWNLOADER ---
 CURRENT_DIR = Path(__file__).parent
 REPO_ROOT = CURRENT_DIR.parent
 
@@ -49,17 +61,7 @@ with st.spinner("Downloading/Loading Models from Drive..."):
     if not SCALER_FILE.exists():
         download_file_from_google_drive(SCALER_FILE_ID, SCALER_FILE)
 
-# MediaPipe Face Mesh Setup
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=False,
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
-
-# --- 3. MODEL LOADERS ---
+# --- 4. MODEL LOADERS ---
 @st.cache_resource
 def load_all_assets():
     try:
@@ -119,7 +121,7 @@ def extract_dynamic_eye_region(frame):
     else:
         return int(w * 0.10), int(h * 0.45), int(w * 0.80), int(h * 0.35)
 
-# --- 4. FRAME PROCESSING FUNCTION ---
+# --- 5. FRAME PROCESSING FUNCTION ---
 def process_frame(frame, sequence_buffer, frame_count, last_emotion):
     h, w, _ = frame.shape
     
@@ -131,7 +133,7 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
     pupil_ratio = 0.33
     
     if eye_crop is not None and eye_crop.shape[0] > 10 and eye_crop.shape[1] > 10:
-        # --- A. UNET EYE SEGMENTATION HIGHLIGHTING (EVERY FRAME) ---
+        # --- A. UNET EYE SEGMENTATION HIGHLIGHTING ---
         resized_crop = cv2.resize(eye_crop, (256, 256))
         
         if expected_in_channels == 1:
@@ -151,10 +153,8 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
             else:
                 pred_mask = (torch.sigmoid(seg_out).squeeze().cpu().numpy() > 0.25).astype(np.uint8)
 
-            # Resize mask back to original cropped eye dimensions
             mask_resized = cv2.resize(pred_mask.astype(np.uint8), (ew, eh), interpolation=cv2.INTER_NEAREST)
 
-            # Create colorful overlay for Sclera, Iris, and Pupil
             color_mask = np.zeros_like(eye_crop, dtype=np.uint8)
             if seg_out.shape[1] > 1:
                 color_mask[mask_resized == 1] = [0, 255, 0]    # 🟢 Sclera: Green
@@ -163,12 +163,10 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
             else:
                 color_mask[mask_resized == 1] = [0, 255, 0]
 
-            # Alpha blend directly onto eyes area
             overlay = eye_crop.copy()
             has_mask = np.any(color_mask > 0, axis=-1)
             overlay[has_mask] = color_mask[has_mask]
             
-            # Highlight parts inside video frame
             cv2.addWeighted(overlay, 0.6, eye_crop, 0.4, 0, frame[ey:ey+eh, ex:ex+ew])
 
             pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
@@ -186,7 +184,6 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
             if isinstance(gaze_coords, list) and len(gaze_coords) >= 2:
                 gaze_x, gaze_y = float(gaze_coords[0]), float(gaze_coords[1])
 
-        # Draw green bounding box around eyes
         cv2.rectangle(frame, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
         cv2.putText(frame, "Segmented Eye Zone", (ex, ey - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
@@ -210,8 +207,7 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
 
     return frame, gaze_x, gaze_y, predicted_emotion
 
-
-# --- 5. DEMO USER INTERFACE ---
+# --- 6. DEMO USER INTERFACE ---
 if loaded_ok:
     col_left, col_right = st.columns([2, 1])
 
@@ -250,16 +246,12 @@ if loaded_ok:
                 frame_count += 1
                 frame = cv2.resize(frame, (640, 480))
                 
-                # Frame processing
                 processed_frame, gx, gy, current_emotion = process_frame(
                     frame, sequence_buffer, frame_count, current_emotion
                 )
 
-                # Show real-time video feed
                 video_placeholder.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
-                
-                # Show updated emotion every 5 frames
-                emotion_metric.metric(label="🧠 Predicted Emotion (Updates Every 5 Frames)", value=current_emotion)
+                emotion_metric.metric(label="🧠 Predicted Emotion (Every 5 Frames)", value=current_emotion)
                 gaze_metric.code(f"Gaze Vector (X, Y):\n({gx:.2f}, {gy:.2f})")
 
                 time.sleep(0.01)
