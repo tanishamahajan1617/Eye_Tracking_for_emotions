@@ -11,7 +11,7 @@ import asyncio
 import joblib
 import gdown
 from pathlib import Path
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration, VideoProcessorBase
 
 # --- 🔇 FORCE ASYNC ENGINE LOCKOUT ---
 logging.getLogger("aioice").setLevel(logging.CRITICAL)
@@ -220,25 +220,53 @@ with tab_live:
 
     class CloudVideoProcessor(VideoProcessorBase):
         def __init__(self) -> None:
-            self.frame_skip = 0
+            self.frame_count = 0
+            self.last_processed_frame = None
+            self.last_emotion = "Initializing..."
 
         def recv(self, frame):
             img = frame.to_ndarray(format="bgr24")
-            self.frame_skip += 1
-            
-            if self.frame_skip % 2 == 0:
+            self.frame_count += 1
+
+            # Process every 2nd frame for real-time FPS stability
+            if self.frame_count % 2 == 0:
                 try:
+                    # Model pipeline call
                     processed_img, gaze, detected, emotion = local_process_frame(img)
-                    cv2.putText(processed_img, f"State: {emotion}", (20, 50), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                    self.last_clean_frame = processed_img
-                except Exception:
-                    self.last_clean_frame = img
-            
-            if hasattr(self, 'last_clean_frame'):
-                return frame.from_ndarray(self.last_clean_frame, format="bgr24")
+                    self.last_emotion = emotion if emotion else "Neutral"
+                    
+                    # Visual Overlay
+                    cv2.putText(
+                        processed_img, 
+                        f"Emotion: {self.last_emotion}", 
+                        (30, 50), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 
+                        1.0, 
+                        (0, 255, 0), 
+                        2,
+                        cv2.LINE_AA
+                    )
+                    self.last_processed_frame = processed_img
+
+                except Exception as e:
+                    # Output error directly onto video frame for quick debugging
+                    err_msg = f"Inference Error: {str(e)[:30]}"
+                    cv2.putText(
+                        img, 
+                        err_msg, 
+                        (30, 50), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 
+                        0.7, 
+                        (0, 0, 255), 
+                        2
+                    )
+                    self.last_processed_frame = img
+
+            if self.last_processed_frame is not None:
+                return frame.from_ndarray(self.last_processed_frame, format="bgr24")
             return frame.from_ndarray(img, format="bgr24")
 
+    # RTC Streamer with Metered TURN Relay
     webrtc_streamer(
         key="stable-cloud-eye-tracking",
         mode=WebRtcMode.SENDRECV,
@@ -247,7 +275,21 @@ with tab_live:
             {"iceServers": [
                 {"urls": ["stun:stun.l.google.com:19302"]},
                 {"urls": ["stun:stun1.l.google.com:19302"]},
-                {"urls": ["stun:stun2.l.google.com:19302"]}
+                {
+                    "urls": ["turn:openrelay.metered.ca:80"],
+                    "username": "openrelayproject",
+                    "credential": "openrelayproject"
+                },
+                {
+                    "urls": ["turn:openrelay.metered.ca:443"],
+                    "username": "openrelayproject",
+                    "credential": "openrelayproject"
+                },
+                {
+                    "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+                    "username": "openrelayproject",
+                    "credential": "openrelayproject"
+                }
             ]}
         ),
         media_stream_constraints={
