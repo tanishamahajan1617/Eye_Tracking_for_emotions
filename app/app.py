@@ -268,7 +268,7 @@ with tab_live:
 
     # RTC Streamer with Metered TURN Relay
     webrtc_streamer(
-        key="stable-cloud-eye-tracking",
+        key="cloud-eye-tracking-v2",
         mode=WebRtcMode.SENDRECV,
         video_processor_factory=CloudVideoProcessor,
         rtc_configuration=RTCConfiguration(
