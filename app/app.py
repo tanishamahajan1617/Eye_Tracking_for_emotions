@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit as st
 import cv2
 import numpy as np
 import torch
@@ -10,24 +9,12 @@ import gdown
 import sys
 from pathlib import Path
 
-# --- 1. SAFE MEDIAPIPE IMPORT ---
-import mediapipe as mp
-
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=False,
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
-
-# --- 2. PAGE CONFIGURATION ---
+# --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="Eye Tracking & Emotion AI Demo", layout="wide")
 st.title("👁️ Eye Tracking & Emotion Recognition System")
-st.caption("Real-time Eye Segmentation Overlay (UNet) & Interval-based Emotion Classification")
+st.caption("Real-time Dynamic Eye Segmentation Overlay (UNet) & Interval-based Emotion Classification")
 
-# --- 3. PATHS & AUTO-DOWNLOADER ---
+# --- 2. PATHS & AUTO-DOWNLOADER ---
 CURRENT_DIR = Path(__file__).parent
 REPO_ROOT = CURRENT_DIR.parent
 
@@ -61,7 +48,11 @@ with st.spinner("Downloading/Loading Models from Drive..."):
     if not SCALER_FILE.exists():
         download_file_from_google_drive(SCALER_FILE_ID, SCALER_FILE)
 
-# --- 4. MODEL LOADERS ---
+# Load OpenCV Cascade Detectors for Face/Eyes
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+
+# --- 3. MODEL LOADERS ---
 @st.cache_resource
 def load_all_assets():
     try:
@@ -95,37 +86,52 @@ def load_all_assets():
 
 seg_model, gaze_model, emotion_model, gaze_scaler, expected_in_channels, loaded_ok = load_all_assets()
 
-# --- DYNAMIC EYE BBOX CROPPER ---
+# --- DYNAMIC EYE BBOX EXTRACTOR (OPENCV HARRCASCADE) ---
 def extract_dynamic_eye_region(frame):
     h, w, _ = frame.shape
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb_frame)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Face detection
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(100, 100))
+    
+    if len(faces) > 0:
+        # Pick the largest face
+        fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
+        face_roi_gray = gray[fy:fy + int(fh * 0.6), fx:fx + fw]  # Upper half of face for eyes
+        
+        # Detect eyes in upper face ROI
+        eyes = eye_cascade.detectMultiScale(face_roi_gray, scaleFactor=1.1, minNeighbors=5)
+        
+        if len(eyes) >= 1:
+            # Create a combined bounding box around detected eye region
+            min_x = min(e[0] for e in eyes) + fx
+            max_x = max(e[0] + e[2] for e in eyes) + fx
+            min_y = min(e[1] for e in eyes) + fy
+            max_y = max(e[1] + e[3] for e in eyes) + fy
+            
+            # Padding
+            pad_x = int(w * 0.02)
+            pad_y = int(h * 0.02)
+            
+            ex = max(0, min_x - pad_x)
+            ey = max(0, min_y - pad_y)
+            ew = min(w - ex, (max_x - min_x) + 2 * pad_x)
+            eh = min(h - ey, (max_y - min_y) + 2 * pad_y)
+            
+            if ew > 20 and eh > 20:
+                return ex, ey, ew, eh
 
-    if results.multi_face_landmarks:
-        landmarks = results.multi_face_landmarks[0].landmark
-        eye_pts_idx = [33, 133, 362, 263, 70, 300, 27, 257, 287] 
-        x_coords = [int(landmarks[idx].x * w) for idx in eye_pts_idx]
-        y_coords = [int(landmarks[idx].y * h) for idx in eye_pts_idx]
+        # Fallback to upper 40% region of the detected face
+        return fx + int(fw * 0.1), fy + int(fh * 0.2), int(fw * 0.8), int(fh * 0.35)
 
-        padding_x = int(w * 0.03)
-        padding_y = int(h * 0.02)
+    # Global Fallback (centered eyes estimation)
+    return int(w * 0.10), int(h * 0.40), int(w * 0.80), int(h * 0.35)
 
-        min_x = max(0, min(x_coords) - padding_x)
-        max_x = min(w, max(x_coords) + padding_x)
-        min_y = max(0, min(y_coords) - padding_y)
-        max_y = min(h, max(y_coords) + padding_y)
-
-        ex, ey = min_x, min_y
-        ew, eh = max_x - min_x, max_y - min_y
-        return ex, ey, ew, eh
-    else:
-        return int(w * 0.10), int(h * 0.45), int(w * 0.80), int(h * 0.35)
-
-# --- 5. FRAME PROCESSING FUNCTION ---
+# --- 4. FRAME PROCESSING FUNCTION ---
 def process_frame(frame, sequence_buffer, frame_count, last_emotion):
     h, w, _ = frame.shape
     
-    # Dynamic crop using MediaPipe
+    # Dynamic crop
     ex, ey, ew, eh = extract_dynamic_eye_region(frame)
     eye_crop = frame[ey:ey+eh, ex:ex+ew]
 
@@ -167,6 +173,7 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
             has_mask = np.any(color_mask > 0, axis=-1)
             overlay[has_mask] = color_mask[has_mask]
             
+            # Highlight parts inside video frame
             cv2.addWeighted(overlay, 0.6, eye_crop, 0.4, 0, frame[ey:ey+eh, ex:ex+ew])
 
             pupil_pixels = np.sum(mask_resized == 3) if seg_out.shape[1] > 1 else np.sum(mask_resized == 1)
@@ -207,7 +214,7 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
 
     return frame, gaze_x, gaze_y, predicted_emotion
 
-# --- 6. DEMO USER INTERFACE ---
+# --- 5. DEMO USER INTERFACE ---
 if loaded_ok:
     col_left, col_right = st.columns([2, 1])
 
