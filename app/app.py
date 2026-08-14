@@ -113,7 +113,7 @@ def extract_dynamic_eye_region(frame):
         if results.multi_face_landmarks:
             landmarks = results.multi_face_landmarks[0].landmark
             
-            # Specific landmarks strictly around both eyes (Left & Right Eyes)
+            # Specific landmarks strictly around both eyes
             eye_pts_idx = [
                 33, 133, 160, 159, 158, 144, 145, 153,  # Left Eye
                 362, 263, 387, 386, 385, 373, 374, 380  # Right Eye
@@ -224,7 +224,7 @@ def process_frame(frame, sequence_buffer, frame_count, last_emotion):
 
     return frame, gaze_x, gaze_y, predicted_emotion
 
-# --- 7. USER INTERFACE & RENDERED VIDEO PLAYER ---
+# --- 7. USER INTERFACE & REAL-TIME STREAMING ---
 if loaded_ok:
     col_left, col_right = st.columns([2, 1])
 
@@ -245,30 +245,15 @@ if loaded_ok:
 
     if uploaded_video is not None:
         temp_input = Path("temp_input_video.mp4")
-        temp_output = Path("temp_output_video.mp4")
         
         with open(temp_input, "wb") as f:
             f.write(uploaded_video.read())
 
-        if st.button("▶️ Process & Render AI Video", type="primary"):
+        if st.button("▶️ Start Real-Time AI Stream", type="primary"):
             cap = cv2.VideoCapture(str(temp_input))
             
-            fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-            # --- H.264 COMPATIBLE CODEC FIX FOR BROWSERS ---
-            try:
-                fourcc = cv2.VideoWriter_fourcc(*'H264')
-                out = cv2.VideoWriter(str(temp_output), fourcc, fps, (width, height))
-                if not out.isOpened():
-                    raise Exception("H264 unavailable")
-            except Exception:
-                fourcc = cv2.VideoWriter_fourcc(*'avc1')
-                out = cv2.VideoWriter(str(temp_output), fourcc, fps, (width, height))
-
-            progress_bar = st.progress(0, text="🤖 Processing Frames with MediaPipe & UNet...")
+            # Placeholder for direct live video feed
+            video_placeholder = col_left.empty()
             
             sequence_buffer = []
             frame_count = 0
@@ -285,25 +270,19 @@ if loaded_ok:
                     frame, sequence_buffer, frame_count, current_emotion
                 )
 
-                out.write(processed_frame)
+                # Stream processed frame directly to browser
+                video_placeholder.image(
+                    cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), 
+                    channels="RGB", 
+                    use_container_width=True
+                )
                 
-                if total_frames > 0:
-                    progress_bar.progress(min(frame_count / total_frames, 1.0))
+                # Update live metrics panel
+                emotion_metric.metric(label="🧠 Emotion Prediction (LSTM)", value=current_emotion)
+                gaze_metric.code(f"Gaze Vector (X, Y):\n({gx:.2f}, {gy:.2f})")
 
             cap.release()
-            out.release()
-            progress_bar.empty()
-
-            st.success("✅ AI Processing Complete!")
-            
-            # --- RENDER WITH EXPLICIT MP4 MIME TYPE ---
-            with open(temp_output, 'rb') as v_file:
-                video_bytes = v_file.read()
-                st.video(video_bytes, format="video/mp4")
-
-            emotion_metric.metric(label="🧠 Final Emotion Prediction", value=current_emotion)
+            st.success("✅ AI Stream Complete!")
 
             if temp_input.exists():
                 temp_input.unlink()
-            if temp_output.exists():
-                temp_output.unlink()
