@@ -46,15 +46,15 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EMOTION_CLASSES = ["Neutral", "Frustrated", "Bored", "Confident"]
 
 COLOR_SCLERA = (0, 255, 0)     # 🟢 Green
-COLOR_IRIS = (255, 255, 0)     # 🩵 Cyan 
-COLOR_PUPIL = (255, 0, 255)    # 🩷 Magenta
+COLOR_IRIS = (255, 255, 0)    # 🩵 Cyan 
+COLOR_PUPIL = (255, 0, 255)   # 🩷 Magenta
 
 def download_file_from_google_drive(file_id, destination):
     url = f'https://drive.google.com/uc?id={file_id}'
     gdown.download(url, str(destination), quiet=False)
 
 SEG_FILE_ID = "11dayKwl4X3UUfERRpyl6s-nz_YXAZvcA"       
-GAZE_FILE_ID = "1EvaC29K0VoCsc7xG72j571cz6mumlsU7"          
+GAZE_FILE_ID = "1EvaC29K0VoCsc7xG72j571cz6mumlsU7"         
 EMOTION_FILE_ID = "1Wh4Rro4jkj9_xCoTs1G11ZA5pNVUPMr7"  
 SCALER_FILE_ID = "1uOtZmD7900j5hbSfV4WTJ8DVvec7B-0r"
 
@@ -252,7 +252,6 @@ if loaded_ok:
         if st.button("▶️ Start Real-Time AI Stream", type="primary"):
             cap = cv2.VideoCapture(str(temp_input))
             
-            # Placeholder for direct live video feed
             video_placeholder = col_left.empty()
             
             sequence_buffer = []
@@ -270,14 +269,12 @@ if loaded_ok:
                     frame, sequence_buffer, frame_count, current_emotion
                 )
 
-                # Stream processed frame directly to browser
                 video_placeholder.image(
                     cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), 
                     channels="RGB", 
                     use_container_width=True
                 )
                 
-                # Update live metrics panel
                 emotion_metric.metric(label="🧠 Emotion Prediction (LSTM)", value=current_emotion)
                 gaze_metric.code(f"Gaze Vector (X, Y):\n({gx:.2f}, {gy:.2f})")
 
