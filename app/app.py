@@ -1,7 +1,7 @@
+import base64
 import importlib
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import cv2
@@ -399,10 +399,15 @@ if uploaded_video is not None:
 
                 # Send the frame as JPEG bytes: avoids Streamlit's media-file cache
                 # deleting the image before the browser fetches it (broken image icon).
-                ok_enc, jpg = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                ok_enc, jpg = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 if ok_enc:
-                    video_placeholder.image(jpg.tobytes(), use_container_width=True)
-                time.sleep(0.01)
+                    b64 = base64.b64encode(jpg.tobytes()).decode("ascii")
+                    # Embed the frame directly in HTML (data URI) so the browser never
+                    # has to fetch a separate media file -> no broken-image icon.
+                    video_placeholder.markdown(
+                        f'<img src="data:image/jpeg;base64,{b64}" style="width:100%;border-radius:6px;">',
+                        unsafe_allow_html=True,
+                    )
                 emotion_metric.metric("🧠 Emotion Prediction (LSTM)", emotion)
                 gaze_metric.code(f"Gaze Vector (X, Y):\n({gx:.2f}, {gy:.2f})")
                 count_metric.code(
