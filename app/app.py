@@ -1,6 +1,7 @@
 import importlib
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import cv2
@@ -396,7 +397,12 @@ if uploaded_video is not None:
 
                 out, gx, gy, emotion, counts = process_frame(frame, sequence_buffer, frame_count, emotion)
 
-                video_placeholder.image(cv2.cvtColor(out, cv2.COLOR_BGR2RGB), channels="RGB", use_container_width=True)
+                # Send the frame as JPEG bytes: avoids Streamlit's media-file cache
+                # deleting the image before the browser fetches it (broken image icon).
+                ok_enc, jpg = cv2.imencode(".jpg", out, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                if ok_enc:
+                    video_placeholder.image(jpg.tobytes(), use_container_width=True)
+                time.sleep(0.01)
                 emotion_metric.metric("🧠 Emotion Prediction (LSTM)", emotion)
                 gaze_metric.code(f"Gaze Vector (X, Y):\n({gx:.2f}, {gy:.2f})")
                 count_metric.code(
